@@ -1,0 +1,553 @@
+#!/bin/sh
+# ccs - Claude Code Switch
+# Minimal provider switching for Claude Code
+# https://github.com/maxgfr/claude-code-switch
+set -eu
+
+VERSION="1.0.0"
+CONFIG_DIR="${HOME}/.claude-provider"
+CONFIG_FILE="${CONFIG_DIR}/config"
+ACTIVE_FILE="${CONFIG_DIR}/active"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# --- Colors (only when stdout is a terminal) ---
+if [ -t 1 ]; then
+    C_RESET="\033[0m"
+    C_BOLD="\033[1m"
+    C_RED="\033[31m"
+    C_GREEN="\033[32m"
+    C_YELLOW="\033[33m"
+    C_CYAN="\033[36m"
+    C_DIM="\033[2m"
+else
+    C_RESET="" C_BOLD="" C_RED="" C_GREEN="" C_YELLOW="" C_CYAN="" C_DIM=""
+fi
+
+# --- Utilities ---
+
+die() {
+    printf "${C_RED}error:${C_RESET} %s\n" "$*" >&2
+    exit 1
+}
+
+warn() {
+    printf "${C_YELLOW}warn:${C_RESET} %s\n" "$*" >&2
+}
+
+info() {
+    printf "${C_GREEN}>>>${C_RESET} %s\n" "$*"
+}
+
+mask_key() {
+    local key="$1"
+    local len
+    len=$(printf '%s' "$key" | wc -c | tr -d ' ')
+    if [ "$len" -gt 12 ]; then
+        local prefix suffix
+        prefix=$(printf '%s' "$key" | cut -c1-8)
+        suffix=$(printf '%s' "$key" | rev | cut -c1-4 | rev)
+        printf '%s...%s' "$prefix" "$suffix"
+    elif [ "$len" -gt 0 ]; then
+        printf '****'
+    else
+        printf '(empty)'
+    fi
+}
+
+# --- Config parser ---
+
+# Parse the INI config file into cfg_<section>_<key> variables
+# Also builds PROVIDERS list (space-separated, excluding _defaults)
+parse_config() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        return 1
+    fi
+
+    local current_section=""
+    PROVIDERS=""
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Strip leading/trailing whitespace
+        line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        # Skip empty lines and comments
+        case "$line" in
+            ""|\#*) continue ;;
+        esac
+
+        # Section header
+        case "$line" in
+            \[*\])
+                current_section=$(printf '%s' "$line" | sed 's/^\[//;s/\]$//')
+                # Validate section name
+                case "$current_section" in
+                    *[!a-zA-Z0-9_-]*)
+                        warn "Skipping invalid section name: $current_section"
+                        current_section=""
+                        ;;
+                    _defaults) ;;
+                    *)
+                        # Add to providers list
+                        PROVIDERS="${PROVIDERS:+$PROVIDERS }$current_section"
+                        ;;
+                esac
+                continue
+                ;;
+        esac
+
+        # Key=value pair
+        if [ -n "$current_section" ]; then
+            case "$line" in
+                *=*)
+                    local key value
+                    key=$(printf '%s' "$line" | cut -d= -f1)
+                    value=$(printf '%s' "$line" | cut -d= -f2-)
+                    # Sanitize key
+                    case "$key" in
+                        *[!a-zA-Z0-9_]*) continue ;;
+                    esac
+                    eval "cfg_${current_section}_${key}=\"\$value\""
+                    ;;
+            esac
+        fi
+    done < "$CONFIG_FILE"
+}
+
+# Get a config value
+get_cfg() {
+    local section="$1" key="$2"
+    eval printf '%s' "\"\${cfg_${section}_${key}:-}\""
+}
+
+# --- State file ---
+
+write_active() {
+    local provider="$1" model="$2" base_url="$3" api_key="$4"
+    cat > "$ACTIVE_FILE" <<EOF
+PROVIDER=$provider
+MODEL=$model
+BASE_URL=$base_url
+API_KEY=$api_key
+EOF
+    chmod 600 "$ACTIVE_FILE"
+}
+
+read_active() {
+    if [ ! -f "$ACTIVE_FILE" ]; then
+        return 1
+    fi
+    ACTIVE_PROVIDER="" ACTIVE_MODEL="" ACTIVE_BASE_URL="" ACTIVE_API_KEY=""
+    while IFS='=' read -r key value; do
+        case "$key" in
+            PROVIDER) ACTIVE_PROVIDER="$value" ;;
+            MODEL)    ACTIVE_MODEL="$value" ;;
+            BASE_URL) ACTIVE_BASE_URL="$value" ;;
+            API_KEY)  ACTIVE_API_KEY="$value" ;;
+        esac
+    done < "$ACTIVE_FILE"
+}
+
+# --- Validation ---
+
+require_config() {
+    mkdir -p "$CONFIG_DIR"
+    chmod 700 "$CONFIG_DIR"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        if [ -f "${SCRIPT_DIR}/config.template" ]; then
+            cp "${SCRIPT_DIR}/config.template" "$CONFIG_FILE"
+        else
+            # Inline minimal config
+            cat > "$CONFIG_FILE" <<'TMPL'
+[_defaults]
+provider=anthropic
+model=claude-sonnet-4-6
+
+[anthropic]
+base_url=
+api_key=
+models=claude-sonnet-4-6,claude-opus-4-6,claude-haiku-4-5-20251001
+default_model=claude-sonnet-4-6
+TMPL
+        fi
+        chmod 600 "$CONFIG_FILE"
+        info "Created config at $CONFIG_FILE"
+        printf "    Edit it to add your API keys: ${C_BOLD}ccs config${C_RESET}\n"
+    fi
+}
+
+validate_provider() {
+    local provider="$1"
+    local p
+    for p in $PROVIDERS; do
+        if [ "$p" = "$provider" ]; then
+            return 0
+        fi
+    done
+    die "Unknown provider '$provider'. Available: $PROVIDERS"
+}
+
+validate_api_key() {
+    local provider="$1"
+    local key
+    key=$(get_cfg "$provider" "api_key")
+    if [ -z "$key" ]; then
+        die "Provider '$provider' has no API key configured. Run: ccs config"
+    fi
+}
+
+resolve_model() {
+    local provider="$1" model_arg="${2:-}"
+    if [ -n "$model_arg" ]; then
+        # Warn if model is not in known list
+        local known
+        known=$(get_cfg "$provider" "models")
+        if [ -n "$known" ]; then
+            local found=0 m
+            OLD_IFS="$IFS"; IFS=","
+            for m in $known; do
+                if [ "$m" = "$model_arg" ]; then
+                    found=1
+                    break
+                fi
+            done
+            IFS="$OLD_IFS"
+            if [ "$found" = "0" ]; then
+                warn "Model '$model_arg' not in known list for '$provider': $known"
+            fi
+        fi
+        printf '%s' "$model_arg"
+        return
+    fi
+    # Try provider default
+    local dm
+    dm=$(get_cfg "$provider" "default_model")
+    if [ -n "$dm" ]; then
+        printf '%s' "$dm"
+        return
+    fi
+    die "No default model for '$provider'. Specify one: ccs use $provider <model>"
+}
+
+# --- Commands ---
+
+cmd_use() {
+    if [ $# -lt 1 ]; then
+        die "Usage: ccs use <provider> [model]"
+    fi
+    local provider="$1"
+    local model_arg="${2:-}"
+
+    parse_config
+    validate_provider "$provider"
+    validate_api_key "$provider"
+
+    local model base_url api_key
+    model=$(resolve_model "$provider" "$model_arg")
+    base_url=$(get_cfg "$provider" "base_url")
+    api_key=$(get_cfg "$provider" "api_key")
+
+    write_active "$provider" "$model" "$base_url" "$api_key"
+
+    info "Switched to ${C_BOLD}${provider}${C_RESET} / ${C_CYAN}${model}${C_RESET}"
+    printf "    Run ${C_BOLD}ccs launch${C_RESET} to start claude\n"
+    printf "    Or  ${C_BOLD}eval \"\$(ccs env)\"${C_RESET} to export to current shell\n"
+}
+
+cmd_list() {
+    parse_config
+
+    local active_provider=""
+    if read_active 2>/dev/null; then
+        active_provider="$ACTIVE_PROVIDER"
+    fi
+
+    printf "\n"
+    printf "  ${C_BOLD}%-2s %-14s %-16s %s${C_RESET}\n" "" "Provider" "Status" "Default Model"
+    printf "  %-2s %-14s %-16s %s\n" "" "--------------" "----------------" "-------------------------"
+
+    local p
+    for p in $PROVIDERS; do
+        local key dm status_text status_color marker
+        key=$(get_cfg "$p" "api_key")
+        dm=$(get_cfg "$p" "default_model")
+        if [ -n "$key" ]; then
+            status_text="configured"
+            status_color="$C_GREEN"
+        else
+            status_text="not configured"
+            status_color="$C_DIM"
+        fi
+        if [ "$p" = "$active_provider" ]; then
+            marker="*"
+        else
+            marker=" "
+        fi
+        printf "  ${C_BOLD}%s${C_RESET} %-14s ${status_color}%-16s${C_RESET} %s\n" "$marker" "$p" "$status_text" "${dm:--}"
+    done
+    printf "\n"
+}
+
+cmd_status() {
+    if ! read_active; then
+        die "No active provider. Run 'ccs use <provider>' first."
+    fi
+
+    printf "\n"
+    printf "  ${C_BOLD}Provider:${C_RESET}  %s\n" "$ACTIVE_PROVIDER"
+    printf "  ${C_BOLD}Model:${C_RESET}     %s\n" "$ACTIVE_MODEL"
+    if [ -n "$ACTIVE_BASE_URL" ]; then
+        printf "  ${C_BOLD}Base URL:${C_RESET}  %s\n" "$ACTIVE_BASE_URL"
+    else
+        printf "  ${C_BOLD}Base URL:${C_RESET}  ${C_DIM}(native Anthropic API)${C_RESET}\n"
+    fi
+    printf "  ${C_BOLD}API Key:${C_RESET}   %s\n" "$(mask_key "$ACTIVE_API_KEY")"
+    printf "\n"
+}
+
+cmd_config() {
+    require_config
+    "${EDITOR:-vi}" "$CONFIG_FILE"
+}
+
+cmd_default() {
+    if [ $# -lt 1 ]; then
+        die "Usage: ccs default <provider> [model]"
+    fi
+    local provider="$1"
+    local model_arg="${2:-}"
+
+    parse_config
+    validate_provider "$provider"
+
+    local model
+    if [ -n "$model_arg" ]; then
+        model="$model_arg"
+    else
+        model=$(get_cfg "$provider" "default_model")
+        if [ -z "$model" ]; then
+            die "No default model for '$provider'. Specify one: ccs default $provider <model>"
+        fi
+    fi
+
+    # Rewrite [_defaults] section in config
+    local tmpfile in_defaults
+    tmpfile=$(mktemp)
+    in_defaults=0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        local stripped
+        stripped=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        case "$stripped" in
+            "[_defaults]")
+                in_defaults=1
+                printf '%s\n' "$line" >> "$tmpfile"
+                continue
+                ;;
+            \[*\])
+                in_defaults=0
+                ;;
+        esac
+
+        if [ "$in_defaults" = "1" ]; then
+            case "$stripped" in
+                provider=*)
+                    printf 'provider=%s\n' "$provider" >> "$tmpfile"
+                    continue
+                    ;;
+                model=*)
+                    printf 'model=%s\n' "$model" >> "$tmpfile"
+                    continue
+                    ;;
+            esac
+        fi
+
+        printf '%s\n' "$line" >> "$tmpfile"
+    done < "$CONFIG_FILE"
+
+    mv "$tmpfile" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+
+    info "Default set to ${C_BOLD}${provider}${C_RESET} / ${C_CYAN}${model}${C_RESET}"
+}
+
+cmd_launch() {
+    # Try active state first, then fall back to defaults
+    if read_active 2>/dev/null && [ -n "$ACTIVE_PROVIDER" ]; then
+        : # use active state
+    else
+        # Fall back to config defaults
+        parse_config
+        local dp dm
+        dp=$(get_cfg "_defaults" "provider")
+        dm=$(get_cfg "_defaults" "model")
+        if [ -z "$dp" ]; then
+            die "No active provider and no default configured. Run 'ccs use <provider>' first."
+        fi
+        validate_provider "$dp"
+        validate_api_key "$dp"
+        local base_url api_key
+        base_url=$(get_cfg "$dp" "base_url")
+        api_key=$(get_cfg "$dp" "api_key")
+        if [ -z "$dm" ]; then
+            dm=$(get_cfg "$dp" "default_model")
+        fi
+        ACTIVE_PROVIDER="$dp"
+        ACTIVE_MODEL="$dm"
+        ACTIVE_BASE_URL="$base_url"
+        ACTIVE_API_KEY="$api_key"
+    fi
+
+    # Verify claude is available
+    if ! command -v claude >/dev/null 2>&1; then
+        die "claude command not found. Install Claude Code first."
+    fi
+
+    info "Launching claude with ${C_BOLD}${ACTIVE_PROVIDER}${C_RESET} / ${C_CYAN}${ACTIVE_MODEL}${C_RESET}"
+
+    if [ -n "$ACTIVE_BASE_URL" ]; then
+        exec env \
+            ANTHROPIC_BASE_URL="$ACTIVE_BASE_URL" \
+            ANTHROPIC_API_KEY="$ACTIVE_API_KEY" \
+            ANTHROPIC_MODEL="$ACTIVE_MODEL" \
+            CLAUDE_CODE_SUBAGENT_MODEL="$ACTIVE_MODEL" \
+            ANTHROPIC_SMALL_FAST_MODEL="$ACTIVE_MODEL" \
+            claude "$@"
+    else
+        # Native Anthropic — no BASE_URL override
+        exec env \
+            ANTHROPIC_API_KEY="$ACTIVE_API_KEY" \
+            ANTHROPIC_MODEL="$ACTIVE_MODEL" \
+            claude "$@"
+    fi
+}
+
+cmd_env() {
+    if ! read_active; then
+        # Try defaults
+        parse_config
+        local dp dm
+        dp=$(get_cfg "_defaults" "provider")
+        dm=$(get_cfg "_defaults" "model")
+        if [ -z "$dp" ]; then
+            die "No active provider and no default configured."
+        fi
+        validate_api_key "$dp"
+        local base_url api_key
+        base_url=$(get_cfg "$dp" "base_url")
+        api_key=$(get_cfg "$dp" "api_key")
+        if [ -z "$dm" ]; then
+            dm=$(get_cfg "$dp" "default_model")
+        fi
+        ACTIVE_PROVIDER="$dp"
+        ACTIVE_MODEL="$dm"
+        ACTIVE_BASE_URL="$base_url"
+        ACTIVE_API_KEY="$api_key"
+    fi
+
+    if [ -n "$ACTIVE_BASE_URL" ]; then
+        printf 'export ANTHROPIC_BASE_URL="%s"\n' "$ACTIVE_BASE_URL"
+    else
+        printf 'unset ANTHROPIC_BASE_URL 2>/dev/null || true\n'
+    fi
+    printf 'export ANTHROPIC_API_KEY="%s"\n' "$ACTIVE_API_KEY"
+    printf 'export ANTHROPIC_MODEL="%s"\n' "$ACTIVE_MODEL"
+    printf 'export CLAUDE_CODE_SUBAGENT_MODEL="%s"\n' "$ACTIVE_MODEL"
+    if [ -n "$ACTIVE_BASE_URL" ]; then
+        printf 'export ANTHROPIC_SMALL_FAST_MODEL="%s"\n' "$ACTIVE_MODEL"
+    fi
+}
+
+cmd_help() {
+    cat <<EOF
+
+${C_BOLD}ccs${C_RESET} - Claude Code Switch v${VERSION}
+Minimal provider switching for Claude Code
+
+${C_BOLD}USAGE${C_RESET}
+    ccs <command> [arguments]
+
+${C_BOLD}COMMANDS${C_RESET}
+    use <provider> [model]      Switch to a provider (optionally override model)
+    list                        List configured providers
+    status                      Show active provider and model
+    config                      Open config file in \$EDITOR
+    default <provider> [model]  Set default provider and model
+    launch [args...]            Launch claude with active provider env vars
+    env                         Print export statements for current shell
+    help                        Show this help
+    version                     Show version
+
+${C_BOLD}EXAMPLES${C_RESET}
+    ccs use anthropic                  Switch to Anthropic (native)
+    ccs use openrouter gpt-4o          Switch to OpenRouter with specific model
+    ccs default deepseek               Set DeepSeek as default provider
+    ccs launch                         Start claude with active provider
+    ccs launch --print "hello"         Launch with extra claude flags
+    eval "\$(ccs env)"                  Export vars to current shell
+
+${C_BOLD}CONFIG${C_RESET}
+    ${CONFIG_FILE}
+
+${C_BOLD}SHELL INTEGRATION${C_RESET}
+    Add to ~/.zshrc or ~/.bashrc:
+
+    ccs() {
+        if [ "\${1:-}" = "use" ] || [ "\${1:-}" = "default" ]; then
+            command ccs "\$@" && eval "\$(command ccs env)"
+        else
+            command ccs "\$@"
+        fi
+    }
+
+EOF
+}
+
+cmd_version() {
+    printf 'ccs %s\n' "$VERSION"
+}
+
+# --- Main ---
+
+main() {
+    require_config
+
+    local cmd="${1:-help}"
+    case "$cmd" in
+        use)
+            shift
+            cmd_use "$@"
+            ;;
+        list|ls)
+            cmd_list
+            ;;
+        status|st)
+            cmd_status
+            ;;
+        config|cfg)
+            cmd_config
+            ;;
+        default|def)
+            shift
+            cmd_default "$@"
+            ;;
+        launch|run)
+            shift
+            cmd_launch "$@"
+            ;;
+        env)
+            cmd_env
+            ;;
+        help|-h|--help)
+            cmd_help
+            ;;
+        version|-v|--version)
+            cmd_version
+            ;;
+        *)
+            die "Unknown command: $cmd. Run 'ccs help'."
+            ;;
+    esac
+}
+
+main "$@"
