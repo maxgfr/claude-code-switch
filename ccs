@@ -186,12 +186,6 @@ api_key=
 models=deepseek-chat,deepseek-reasoner
 default_model=deepseek-chat
 
-[mistral]
-base_url=https://api.mistral.ai/v1
-api_key=
-models=mistral-large-latest,codestral-latest
-default_model=mistral-large-latest
-
 [zai]
 base_url=https://api.z.ai/api/paas/v4/
 api_key=

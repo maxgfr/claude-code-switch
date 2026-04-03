@@ -2,13 +2,13 @@
 
 Minimal, zero-dependency provider switching for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). One shell script to rule them all.
 
-Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Mistral, Z.AI, or any custom endpoint) with a single command. Configure a default model per provider and globally.
+Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, or any custom endpoint) with a single command. Configure a default model per provider and globally.
 
 Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-code-switch), stripped down to the essentials: **switch provider, set model, launch claude**.
 
 ## Features
 
-- **6 built-in providers**: Anthropic, OpenRouter, DeepSeek, Mistral, Z.AI, Custom
+- **5 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Custom
 - **Default model**: configurable globally and per provider
 - **Zero dependencies**: pure POSIX sh — no jq, no python, no node
 - **Shell integration**: `eval "$(ccs env)"` exports vars to your current session
@@ -98,7 +98,6 @@ eval "$(ccs env)"                     # Export env vars to current session
 | `anthropic`  | *(native — no override)*       | `claude-sonnet-4-6`            |
 | `openrouter` | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4`    |
 | `deepseek`   | `https://api.deepseek.com/v1`  | `deepseek-chat`                |
-| `mistral`    | `https://api.mistral.ai/v1`    | `mistral-large-latest`         |
 | `zai`        | `https://api.z.ai/api/paas/v4/`| `glm-4.6`                      |
 | `custom`     | *(user-defined)*               | *(user-defined)*               |
 
