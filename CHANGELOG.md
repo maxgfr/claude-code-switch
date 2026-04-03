@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - Provider switching via `ccs use <provider> [model]`
 - Configurable default provider and model in `~/.claude-provider/config`
-- INI-based configuration with 7 built-in providers (Anthropic, OpenRouter, DeepSeek, Gemini, Mistral, OpenAI, Custom)
+- INI-based configuration with 8 built-in providers (Anthropic, OpenRouter, DeepSeek, Gemini, Mistral, OpenAI, Z.AI, Custom)
 - Environment variable export for shell integration (`ccs env`)
 - Direct Claude Code launch with provider env vars (`ccs launch`)
 - Provider listing with configuration status (`ccs list`)

@@ -153,10 +153,16 @@ require_config() {
     mkdir -p "$CONFIG_DIR"
     chmod 700 "$CONFIG_DIR"
     if [ ! -f "$CONFIG_FILE" ]; then
+        # Try to find config.template: script dir, Homebrew pkgshare, or inline
+        local template=""
         if [ -f "${SCRIPT_DIR}/config.template" ]; then
-            cp "${SCRIPT_DIR}/config.template" "$CONFIG_FILE"
+            template="${SCRIPT_DIR}/config.template"
+        elif [ -f "$(brew --prefix 2>/dev/null)/share/claude-code-switch/config.template" ]; then
+            template="$(brew --prefix)/share/claude-code-switch/config.template"
+        fi
+        if [ -n "$template" ]; then
+            cp "$template" "$CONFIG_FILE"
         else
-            # Inline minimal config
             cat > "$CONFIG_FILE" <<'TMPL'
 [_defaults]
 provider=anthropic
@@ -167,6 +173,48 @@ base_url=
 api_key=
 models=claude-sonnet-4-6,claude-opus-4-6,claude-haiku-4-5-20251001
 default_model=claude-sonnet-4-6
+
+[openrouter]
+base_url=https://openrouter.ai/api/v1
+api_key=
+models=anthropic/claude-sonnet-4,openai/gpt-4o,google/gemini-2.5-pro
+default_model=anthropic/claude-sonnet-4
+
+[deepseek]
+base_url=https://api.deepseek.com/v1
+api_key=
+models=deepseek-chat,deepseek-reasoner
+default_model=deepseek-chat
+
+[gemini]
+base_url=https://generativelanguage.googleapis.com/v1beta/
+api_key=
+models=gemini-2.5-pro,gemini-2.5-flash
+default_model=gemini-2.5-pro
+
+[mistral]
+base_url=https://api.mistral.ai/v1
+api_key=
+models=mistral-large-latest,codestral-latest
+default_model=mistral-large-latest
+
+[openai]
+base_url=https://api.openai.com/v1
+api_key=
+models=gpt-4o,gpt-4o-mini,o3-mini
+default_model=gpt-4o
+
+[zai]
+base_url=https://api.z.ai/api/paas/v4/
+api_key=
+models=glm-5,glm-4.6,glm-4.5
+default_model=glm-4.6
+
+[custom]
+base_url=
+api_key=
+models=
+default_model=
 TMPL
         fi
         chmod 600 "$CONFIG_FILE"
