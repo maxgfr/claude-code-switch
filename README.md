@@ -2,13 +2,13 @@
 
 Minimal, zero-dependency provider switching for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). One shell script to rule them all.
 
-Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Gemini, Mistral, OpenAI, Z.AI, or any custom endpoint) with a single command. Configure a default model per provider and globally.
+Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Mistral, Z.AI, or any custom endpoint) with a single command. Configure a default model per provider and globally.
 
 Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-code-switch), stripped down to the essentials: **switch provider, set model, launch claude**.
 
 ## Features
 
-- **8 built-in providers**: Anthropic, OpenRouter, DeepSeek, Gemini, Mistral, OpenAI, Z.AI, Custom
+- **6 built-in providers**: Anthropic, OpenRouter, DeepSeek, Mistral, Z.AI, Custom
 - **Default model**: configurable globally and per provider
 - **Zero dependencies**: pure POSIX sh — no jq, no python, no node
 - **Shell integration**: `eval "$(ccs env)"` exports vars to your current session
@@ -95,14 +95,12 @@ eval "$(ccs env)"                     # Export env vars to current session
 
 | Provider     | Base URL                                           | Default Model                  |
 |--------------|----------------------------------------------------|---------------------------------|
-| `anthropic`  | *(native — no override)*                           | `claude-sonnet-4-6`            |
-| `openrouter` | `https://openrouter.ai/api/v1`                     | `anthropic/claude-sonnet-4`    |
-| `deepseek`   | `https://api.deepseek.com/v1`                      | `deepseek-chat`                |
-| `gemini`     | `https://generativelanguage.googleapis.com/v1beta/` | `gemini-2.5-pro`               |
-| `mistral`    | `https://api.mistral.ai/v1`                        | `mistral-large-latest`         |
-| `openai`     | `https://api.openai.com/v1`                        | `gpt-4o`                       |
-| `zai`        | `https://api.z.ai/api/paas/v4/`                    | `glm-4.6`                      |
-| `custom`     | *(user-defined)*                                   | *(user-defined)*               |
+| `anthropic`  | *(native — no override)*       | `claude-sonnet-4-6`            |
+| `openrouter` | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4`    |
+| `deepseek`   | `https://api.deepseek.com/v1`  | `deepseek-chat`                |
+| `mistral`    | `https://api.mistral.ai/v1`    | `mistral-large-latest`         |
+| `zai`        | `https://api.z.ai/api/paas/v4/`| `glm-4.6`                      |
+| `custom`     | *(user-defined)*               | *(user-defined)*               |
 
 ### Z.AI Coding Plan
 
