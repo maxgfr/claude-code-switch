@@ -96,9 +96,9 @@ eval "$(ccs env)"                     # Export env vars to current session
 | Provider     | Base URL                                           | Default Model                  |
 |--------------|----------------------------------------------------|---------------------------------|
 | `anthropic`  | *(native — no override)*       | `claude-sonnet-4-6`            |
-| `openrouter` | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4`    |
-| `deepseek`   | `https://api.deepseek.com/v1`  | `deepseek-chat`                |
-| `zai`        | `https://api.z.ai/api/paas/v4/`| `glm-4.6`                      |
+| `openrouter` | `https://openrouter.ai/api` | `anthropic/claude-sonnet-4`    |
+| `deepseek`   | `https://api.deepseek.com/anthropic`  | `deepseek-chat`                |
+| `zai`        | `https://api.z.ai/api/coding/paas/v4`| `glm-4.6`                      |
 | `custom`     | *(user-defined)*               | *(user-defined)*               |
 
 ### Z.AI Coding Plan
@@ -130,13 +130,13 @@ models=claude-sonnet-4-6,claude-opus-4-6,claude-haiku-4-5-20251001
 default_model=claude-sonnet-4-6
 
 [openrouter]
-base_url=https://openrouter.ai/api/v1
+base_url=https://openrouter.ai/api
 api_key=sk-or-v1-your-key-here
 models=anthropic/claude-sonnet-4,openai/gpt-4o,google/gemini-2.5-pro
 default_model=anthropic/claude-sonnet-4
 
 [zai]
-base_url=https://api.z.ai/api/paas/v4/
+base_url=https://api.z.ai/api/coding/paas/v4
 api_key=your-zai-key-here
 models=glm-5,glm-4.6,glm-4.5
 default_model=glm-4.6
