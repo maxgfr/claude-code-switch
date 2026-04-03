@@ -74,6 +74,9 @@ ccs use anthropic claude-opus-4-6     # Override model
 ccs use openrouter openai/gpt-4o     # OpenRouter with specific model
 ccs use deepseek deepseek-reasoner   # DeepSeek R1
 ccs use zai glm-5                    # Z.AI GLM-5
+ccs use kimi                         # Kimi K2.5
+ccs use qwen                         # Qwen 3.5 Plus
+ccs use minimax                      # MiniMax M2.7
 
 # Set persistent defaults
 ccs default openrouter               # Set OpenRouter as default provider
@@ -93,22 +96,24 @@ eval "$(ccs env)"                     # Export env vars to current session
 
 ## Providers
 
-| Provider     | Base URL                                           | Default Model                  |
-|--------------|----------------------------------------------------|---------------------------------|
-| `anthropic`  | *(native — no override)*       | `claude-sonnet-4-6`            |
-| `openrouter` | `https://openrouter.ai/api` | `anthropic/claude-sonnet-4`    |
-| `deepseek`   | `https://api.deepseek.com/anthropic`  | `deepseek-chat`                |
-| `zai`        | `https://api.z.ai/api/coding/paas/v4`                    | `glm-4.6`                      |
-| `kimi`       | `https://api.moonshot.ai/anthropic/v1/messages`          | `kimi-k2.5`                    |
-| `qwen`       | `https://dashscope-intl.aliyuncs.com/compatible-mode/anthropic` | `qwen3.5-plus`          |
-| `minimax`    | `https://api.minimax.io/anthropic`                       | `m2.7`                         |
-| `custom`     | *(user-defined)*                                         | *(user-defined)*               |
+All providers expose an Anthropic-compatible Messages API endpoint, confirmed working with Claude Code.
+
+| Provider     | Base URL                                                        | Default Model               |
+|--------------|-----------------------------------------------------------------|-----------------------------|
+| `anthropic`  | *(native — no override)*                                        | `claude-sonnet-4-6`         |
+| `openrouter` | `https://openrouter.ai/api`                                     | `anthropic/claude-sonnet-4` |
+| `deepseek`   | `https://api.deepseek.com/anthropic`                            | `deepseek-chat`             |
+| `zai`        | `https://api.z.ai/api/coding/paas/v4`                          | `glm-4.7`                   |
+| `kimi`       | `https://api.moonshot.ai/anthropic/v1/messages`                 | `kimi-k2.5`                 |
+| `qwen`       | `https://dashscope-intl.aliyuncs.com/compatible-mode/anthropic` | `qwen3.5-plus`              |
+| `minimax`    | `https://api.minimax.io/anthropic`                              | `m2.7`                      |
+| `custom`     | *(user-defined)*                                                | *(user-defined)*            |
 
 ### Z.AI Coding Plan
 
 [Z.AI](https://z.ai) offers a **Coding Plan** optimized for AI-powered coding tools like Claude Code:
 
-- **Models**: GLM-5, GLM-4.6, GLM-4.5
+- **Models**: GLM-5, GLM-4.7, GLM-4.6
 - **Plans**: Coding Lite ($6/mo), Standard ($10/mo), Pro ($30/mo)
 - **Get your API key**: [z.ai/manage-apikey](https://z.ai/manage-apikey/apikey-list)
 
@@ -141,8 +146,8 @@ default_model=anthropic/claude-sonnet-4
 [zai]
 base_url=https://api.z.ai/api/coding/paas/v4
 api_key=your-zai-key-here
-models=glm-5,glm-4.6,glm-4.5
-default_model=glm-4.6
+models=glm-5,glm-4.7,glm-4.6
+default_model=glm-4.7
 ```
 
 - **`[_defaults]`** — global default provider and model
@@ -169,13 +174,13 @@ ccs() {
 
 `ccs` sets these environment variables before launching Claude Code:
 
-| Variable                       | When                                     |
-|-------------------------------|------------------------------------------|
-| `ANTHROPIC_BASE_URL`          | All providers except `anthropic` (unset for native) |
-| `ANTHROPIC_API_KEY`           | Always                                   |
-| `ANTHROPIC_MODEL`             | Always                                   |
-| `CLAUDE_CODE_SUBAGENT_MODEL`  | Always (same value as `ANTHROPIC_MODEL`) |
-| `ANTHROPIC_SMALL_FAST_MODEL`  | Non-Anthropic providers only             |
+| Variable                      | When                                                 |
+|-------------------------------|------------------------------------------------------|
+| `ANTHROPIC_BASE_URL`          | All providers except `anthropic` (unset for native)  |
+| `ANTHROPIC_API_KEY`           | Always                                               |
+| `ANTHROPIC_MODEL`             | Always                                               |
+| `CLAUDE_CODE_SUBAGENT_MODEL`  | Always (same value as `ANTHROPIC_MODEL`)             |
+| `ANTHROPIC_SMALL_FAST_MODEL`  | Non-Anthropic providers only                         |
 
 State is persisted in `~/.claude-provider/active` so `ccs launch` works across shell sessions.
 
