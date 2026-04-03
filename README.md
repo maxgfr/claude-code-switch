@@ -2,13 +2,13 @@
 
 Minimal, zero-dependency provider switching for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). One shell script to rule them all.
 
-Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, or any custom endpoint) with a single command. Configure a default model per provider and globally.
+Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, or any custom endpoint) with a single command. Configure a default model per provider and globally.
 
 Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-code-switch), stripped down to the essentials: **switch provider, set model, launch claude**.
 
 ## Features
 
-- **5 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Custom
+- **8 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Custom
 - **Default model**: configurable globally and per provider
 - **Zero dependencies**: pure POSIX sh — no jq, no python, no node
 - **Shell integration**: `eval "$(ccs env)"` exports vars to your current session
@@ -98,8 +98,11 @@ eval "$(ccs env)"                     # Export env vars to current session
 | `anthropic`  | *(native — no override)*       | `claude-sonnet-4-6`            |
 | `openrouter` | `https://openrouter.ai/api` | `anthropic/claude-sonnet-4`    |
 | `deepseek`   | `https://api.deepseek.com/anthropic`  | `deepseek-chat`                |
-| `zai`        | `https://api.z.ai/api/coding/paas/v4`| `glm-4.6`                      |
-| `custom`     | *(user-defined)*               | *(user-defined)*               |
+| `zai`        | `https://api.z.ai/api/coding/paas/v4`                    | `glm-4.6`                      |
+| `kimi`       | `https://api.moonshot.ai/anthropic/v1/messages`          | `kimi-k2.5`                    |
+| `qwen`       | `https://dashscope-intl.aliyuncs.com/compatible-mode/anthropic` | `qwen3.5-plus`          |
+| `minimax`    | `https://api.minimax.io/anthropic`                       | `m2.7`                         |
+| `custom`     | *(user-defined)*                                         | *(user-defined)*               |
 
 ### Z.AI Coding Plan
 
