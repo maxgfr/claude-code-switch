@@ -46,7 +46,7 @@ config.template     # Default config with all providers
 
 ## Adding a new provider
 
-1. Add `[provider_name]` section to `config.template` with `base_url`, `api_key`, `models`, `default_model`
+1. Add `[provider_name]` section to `config.template` with `base_url`, `api_key`, `model`
 2. Add the same section to the inline fallback config in `require_config()` inside `ccs`
 3. Update README.md providers table
 4. The provider **must** support the Anthropic Messages API format

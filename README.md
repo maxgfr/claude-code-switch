@@ -148,31 +148,27 @@ model=claude-sonnet-4-6
 [anthropic]
 base_url=
 api_key=sk-ant-your-key-here
-models=claude-sonnet-4-6,claude-opus-4-6,claude-haiku-4-5-20251001
-default_model=claude-sonnet-4-6
+model=claude-sonnet-4-6
 
 [openrouter]
 base_url=https://openrouter.ai/api
 api_key=sk-or-v1-your-key-here
-models=anthropic/claude-sonnet-4,openai/gpt-4o,google/gemini-2.5-pro
-default_model=anthropic/claude-sonnet-4
+model=anthropic/claude-sonnet-4
 
 [zai]
 base_url=https://api.z.ai/api/anthropic
 api_key=your-zai-key-here
-default_model=glm-5.1
+model=glm-5.1
 opus_model=glm-5.1
-sonnet_model=glm-4.7
 haiku_model=glm-4.7
 ```
 
 - **`[_defaults]`** — global default provider and model
 - **`api_key=`** — empty means not configured
 - **`base_url=`** — empty for `[anthropic]` uses native Anthropic API (no `ANTHROPIC_BASE_URL`)
-- **`default_model=`** — model used when none specified in `ccs use`
-- **`opus_model=`** — model for `/models` opus tier (falls back to `default_model`)
-- **`sonnet_model=`** — model for `/models` sonnet tier + subagents (falls back to `default_model`)
-- **`haiku_model=`** — model for `/models` haiku tier + fast tasks (falls back to `default_model`)
+- **`model=`** — main model (maps to sonnet/default tier in `/models`)
+- **`opus_model=`** — optional, for `/models` opus tier (falls back to `model`)
+- **`haiku_model=`** — optional, for `/models` haiku tier + fast tasks (falls back to `model`)
 
 ## Shell integration
 
@@ -204,9 +200,9 @@ ccs             → Claude Code with provider env vars (scoped to that process)
 | `ANTHROPIC_API_KEY`             | Native Anthropic only                              |
 | `ANTHROPIC_MODEL`               | Always                                             |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL`  | Third-party — maps to `opus_model` in config       |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL`| Third-party — maps to `sonnet_model` in config     |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL`| Third-party — maps to `model` in config            |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Third-party — maps to `haiku_model` in config      |
-| `CLAUDE_CODE_SUBAGENT_MODEL`    | Third-party — uses `sonnet_model`                  |
+| `CLAUDE_CODE_SUBAGENT_MODEL`    | Third-party — uses `model`                         |
 | `ANTHROPIC_SMALL_FAST_MODEL`    | Third-party — uses `haiku_model`                   |
 
 State is persisted in `~/.claude-provider/active` so `ccs` works across shell sessions. Run `ccs reset` to clear it, or `ccs purge` to remove all ccs data.

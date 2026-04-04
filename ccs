@@ -183,55 +183,52 @@ model=claude-sonnet-4-6
 [anthropic]
 base_url=
 api_key=
-default_model=claude-sonnet-4-6
+model=claude-sonnet-4-6
 
 [openrouter]
 base_url=https://openrouter.ai/api
 api_key=
-default_model=anthropic/claude-sonnet-4
+model=anthropic/claude-sonnet-4
 
 [deepseek]
 base_url=https://api.deepseek.com/anthropic
 api_key=
-default_model=deepseek-chat
+model=deepseek-chat
 opus_model=deepseek-reasoner
-sonnet_model=deepseek-chat
-haiku_model=deepseek-chat
 
 [zai]
 base_url=https://api.z.ai/api/anthropic
 api_key=
-default_model=glm-5.1
+model=glm-5.1
 opus_model=glm-5.1
-sonnet_model=glm-4.7
 haiku_model=glm-4.7
 
 [kimi]
 base_url=https://api.moonshot.ai/anthropic
 api_key=
-default_model=kimi-k2.5
+model=kimi-k2.5
 
 [qwen]
 base_url=https://dashscope-intl.aliyuncs.com/apps/anthropic
 api_key=
-default_model=qwen3.5-plus
+model=qwen3.5-plus
 haiku_model=qwen3-coder-plus
 
 [minimax]
 base_url=https://api.minimax.io/anthropic
 api_key=
-default_model=MiniMax-M2.7
+model=MiniMax-M2.7
 haiku_model=MiniMax-M2.5
 
 [doubao]
 base_url=https://ark.cn-beijing.volces.com/api/coding
 api_key=
-default_model=doubao-seed-code-preview-latest
+model=doubao-seed-code-preview-latest
 
 [custom]
 base_url=
 api_key=
-default_model=
+model=
 TMPL
         fi
         chmod 600 "$CONFIG_FILE"
@@ -267,12 +264,15 @@ resolve_model() {
         return
     fi
     local dm
-    dm=$(get_cfg "$provider" "default_model")
+    dm=$(get_cfg "$provider" "model")
+    # Backward compat: try sonnet_model, then default_model
+    if [ -z "$dm" ]; then dm=$(get_cfg "$provider" "sonnet_model"); fi
+    if [ -z "$dm" ]; then dm=$(get_cfg "$provider" "default_model"); fi
     if [ -n "$dm" ]; then
         printf '%s' "$dm"
         return
     fi
-    die "No default model for '$provider'. Specify one: ccs use $provider <model>"
+    die "No model configured for '$provider'. Specify one: ccs use $provider <model>"
 }
 
 # --- Commands ---
@@ -288,18 +288,15 @@ cmd_use() {
     validate_provider "$provider"
     validate_api_key "$provider"
 
-    local model base_url api_key opus sonnet haiku
+    local model base_url api_key opus haiku
     model=$(resolve_model "$provider" "$model_arg")
     base_url=$(get_cfg "$provider" "base_url")
     api_key=$(get_cfg "$provider" "api_key")
     opus=$(get_cfg "$provider" "opus_model")
-    sonnet=$(get_cfg "$provider" "sonnet_model")
     haiku=$(get_cfg "$provider" "haiku_model")
-    opus="${opus:-$model}"
-    sonnet="${sonnet:-$model}"
-    haiku="${haiku:-$model}"
 
-    write_active "$provider" "$model" "$base_url" "$api_key" "$opus" "$sonnet" "$haiku"
+    write_active "$provider" "$model" "$base_url" "$api_key" \
+        "${opus:-$model}" "$model" "${haiku:-$model}"
     write_defaults "$provider" "$model"
 
     info "Switched to ${C_BOLD}${provider}${C_RESET} / ${C_CYAN}${model}${C_RESET}"
@@ -315,14 +312,16 @@ cmd_list() {
     fi
 
     printf "\n"
-    printf '  %s%-2s %-14s %-16s %s%s\n' "${C_BOLD}" "" "Provider" "Status" "Default Model" "${C_RESET}"
+    printf '  %s%-2s %-14s %-16s %s%s\n' "${C_BOLD}" "" "Provider" "Status" "Model" "${C_RESET}"
     printf '  %-2s %-14s %-16s %s\n' "" "--------------" "----------------" "-------------------------"
 
     local p
     for p in $PROVIDERS; do
         local key dm status_text status_color marker
         key=$(get_cfg "$p" "api_key")
-        dm=$(get_cfg "$p" "default_model")
+        dm=$(get_cfg "$p" "model")
+        if [ -z "$dm" ]; then dm=$(get_cfg "$p" "sonnet_model"); fi
+        if [ -z "$dm" ]; then dm=$(get_cfg "$p" "default_model"); fi
         if [ -n "$key" ]; then
             status_text="configured"
             status_color="$C_GREEN"
@@ -419,12 +418,17 @@ cmd_launch() {
         fi
         validate_provider "$dp"
         validate_api_key "$dp"
-        local base_url api_key opus sonnet haiku
+        local base_url api_key opus haiku
         base_url=$(get_cfg "$dp" "base_url")
         api_key=$(get_cfg "$dp" "api_key")
         opus=$(get_cfg "$dp" "opus_model")
-        sonnet=$(get_cfg "$dp" "sonnet_model")
         haiku=$(get_cfg "$dp" "haiku_model")
+        if [ -z "$dm" ]; then
+            dm=$(get_cfg "$dp" "model")
+        fi
+        if [ -z "$dm" ]; then
+            dm=$(get_cfg "$dp" "sonnet_model")
+        fi
         if [ -z "$dm" ]; then
             dm=$(get_cfg "$dp" "default_model")
         fi
@@ -433,7 +437,7 @@ cmd_launch() {
         ACTIVE_BASE_URL="$base_url"
         ACTIVE_API_KEY="$api_key"
         ACTIVE_OPUS="${opus:-$dm}"
-        ACTIVE_SONNET="${sonnet:-$dm}"
+        ACTIVE_SONNET="$dm"
         ACTIVE_HAIKU="${haiku:-$dm}"
     fi
 
@@ -477,12 +481,17 @@ cmd_env() {
             die "No active provider and no default configured."
         fi
         validate_api_key "$dp"
-        local base_url api_key opus sonnet haiku
+        local base_url api_key opus haiku
         base_url=$(get_cfg "$dp" "base_url")
         api_key=$(get_cfg "$dp" "api_key")
         opus=$(get_cfg "$dp" "opus_model")
-        sonnet=$(get_cfg "$dp" "sonnet_model")
         haiku=$(get_cfg "$dp" "haiku_model")
+        if [ -z "$dm" ]; then
+            dm=$(get_cfg "$dp" "model")
+        fi
+        if [ -z "$dm" ]; then
+            dm=$(get_cfg "$dp" "sonnet_model")
+        fi
         if [ -z "$dm" ]; then
             dm=$(get_cfg "$dp" "default_model")
         fi
@@ -491,7 +500,7 @@ cmd_env() {
         ACTIVE_BASE_URL="$base_url"
         ACTIVE_API_KEY="$api_key"
         ACTIVE_OPUS="${opus:-$dm}"
-        ACTIVE_SONNET="${sonnet:-$dm}"
+        ACTIVE_SONNET="$dm"
         ACTIVE_HAIKU="${haiku:-$dm}"
     fi
 
