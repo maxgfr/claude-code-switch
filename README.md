@@ -2,13 +2,13 @@
 
 Minimal, zero-dependency provider switching for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). One shell script to rule them all.
 
-Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, or any custom endpoint) with a single command. Configure a default model per provider and globally.
+Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, or any custom endpoint) with a single command. Configure a default model per provider and globally.
 
 Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-code-switch), stripped down to the essentials: **switch provider, set model, launch claude**.
 
 ## Features
 
-- **8 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Custom
+- **9 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, Custom
 - **Default model**: configurable globally and per provider
 - **Zero dependencies**: pure POSIX sh — no jq, no python, no node
 - **Shell integration**: `eval "$(ccs env)"` exports vars to your current session
@@ -73,10 +73,11 @@ ccs use anthropic                     # Use default model (claude-sonnet-4-6)
 ccs use anthropic claude-opus-4-6     # Override model
 ccs use openrouter openai/gpt-4o     # OpenRouter with specific model
 ccs use deepseek deepseek-reasoner   # DeepSeek R1
-ccs use zai glm-5                    # Z.AI GLM-5
+ccs use zai glm-5.1                  # Z.AI GLM-5.1
 ccs use kimi                         # Kimi K2.5
 ccs use qwen                         # Qwen 3.5 Plus
 ccs use minimax                      # MiniMax M2.7
+ccs use doubao                       # Doubao Seed Code (ByteDance)
 
 # Set persistent defaults
 ccs default openrouter               # Set OpenRouter as default provider
@@ -98,27 +99,41 @@ eval "$(ccs env)"                     # Export env vars to current session
 
 All providers expose an Anthropic-compatible Messages API endpoint, confirmed working with Claude Code.
 
-| Provider     | Base URL                                                        | Default Model               |
-|--------------|-----------------------------------------------------------------|-----------------------------|
-| `anthropic`  | *(native — no override)*                                        | `claude-sonnet-4-6`         |
-| `openrouter` | `https://openrouter.ai/api`                                     | `anthropic/claude-sonnet-4` |
-| `deepseek`   | `https://api.deepseek.com/anthropic`                            | `deepseek-chat`             |
-| `zai`        | `https://api.z.ai/api/coding/paas/v4`                          | `glm-4.7`                   |
-| `kimi`       | `https://api.moonshot.ai/anthropic/v1/messages`                 | `kimi-k2.5`                 |
-| `qwen`       | `https://dashscope-intl.aliyuncs.com/compatible-mode/anthropic` | `qwen3.5-plus`              |
-| `minimax`    | `https://api.minimax.io/anthropic`                              | `m2.7`                      |
-| `custom`     | *(user-defined)*                                                | *(user-defined)*            |
+| Provider     | Base URL                                                  | Default Model                    |
+|--------------|-----------------------------------------------------------|----------------------------------|
+| `anthropic`  | *(native — no override)*                                  | `claude-sonnet-4-6`              |
+| `openrouter` | `https://openrouter.ai/api`                               | `anthropic/claude-sonnet-4`      |
+| `deepseek`   | `https://api.deepseek.com/anthropic`                      | `deepseek-chat`                  |
+| `zai`        | `https://api.z.ai/api/anthropic`                          | `glm-5.1`                        |
+| `kimi`       | `https://api.moonshot.ai/anthropic`                       | `kimi-k2.5`                      |
+| `qwen`       | `https://dashscope-intl.aliyuncs.com/apps/anthropic`      | `qwen3.5-plus`                   |
+| `minimax`    | `https://api.minimax.io/anthropic`                        | `MiniMax-M2.7`                   |
+| `doubao`     | `https://ark.cn-beijing.volces.com/api/coding`            | `doubao-seed-code-preview-latest`|
+| `custom`     | *(user-defined)*                                          | *(user-defined)*                 |
 
 ### Z.AI Coding Plan
 
 [Z.AI](https://z.ai) offers a **Coding Plan** optimized for AI-powered coding tools like Claude Code:
 
-- **Models**: GLM-5, GLM-4.7, GLM-4.6
+- **Models**: GLM-5.1, GLM-5, GLM-4.7, GLM-4.6
 - **Plans**: Coding Lite ($6/mo), Standard ($10/mo), Pro ($30/mo)
 - **Get your API key**: [z.ai/manage-apikey](https://z.ai/manage-apikey/apikey-list)
 
 ```sh
-ccs use zai glm-5
+ccs use zai glm-5.1
+ccs launch
+```
+
+### Doubao (ByteDance/Volcengine)
+
+[Doubao](https://www.volcengine.com/product/doubao) is ByteDance's AI platform with coding-optimized models:
+
+- **Models**: `doubao-seed-code-preview-latest` (256K context)
+- **Free tier**: 50M tokens/day for new users
+- **Get your API key**: [Volcengine ARK Console](https://console.volcengine.com/ark)
+
+```sh
+ccs use doubao
 ccs launch
 ```
 
@@ -144,10 +159,10 @@ models=anthropic/claude-sonnet-4,openai/gpt-4o,google/gemini-2.5-pro
 default_model=anthropic/claude-sonnet-4
 
 [zai]
-base_url=https://api.z.ai/api/coding/paas/v4
+base_url=https://api.z.ai/api/anthropic
 api_key=your-zai-key-here
-models=glm-5,glm-4.7,glm-4.6
-default_model=glm-4.7
+models=glm-5.1,glm-5,glm-4.7,glm-4.6
+default_model=glm-5.1
 ```
 
 - **`[_defaults]`** — global default provider and model
