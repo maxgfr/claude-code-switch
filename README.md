@@ -160,15 +160,19 @@ default_model=anthropic/claude-sonnet-4
 [zai]
 base_url=https://api.z.ai/api/anthropic
 api_key=your-zai-key-here
-models=glm-5.1,glm-5,glm-4.7,glm-4.6
 default_model=glm-5.1
+opus_model=glm-5.1
+sonnet_model=glm-4.7
+haiku_model=glm-4.7
 ```
 
 - **`[_defaults]`** — global default provider and model
 - **`api_key=`** — empty means not configured
 - **`base_url=`** — empty for `[anthropic]` uses native Anthropic API (no `ANTHROPIC_BASE_URL`)
-- **`models=`** — comma-separated list of available models (informational + validation)
 - **`default_model=`** — model used when none specified in `ccs use`
+- **`opus_model=`** — model for `/models` opus tier (falls back to `default_model`)
+- **`sonnet_model=`** — model for `/models` sonnet tier + subagents (falls back to `default_model`)
+- **`haiku_model=`** — model for `/models` haiku tier + fast tasks (falls back to `default_model`)
 
 ## Shell integration
 
@@ -195,12 +199,15 @@ ccs             → Claude Code with provider env vars (scoped to that process)
 
 | Variable                      | When                                                 |
 |-------------------------------|------------------------------------------------------|
-| `ANTHROPIC_BASE_URL`          | Third-party providers only (unset for native)        |
-| `ANTHROPIC_AUTH_TOKEN`        | Third-party providers only (avoids API key prompt)   |
-| `ANTHROPIC_API_KEY`           | Native Anthropic only                                |
-| `ANTHROPIC_MODEL`             | Always                                               |
-| `CLAUDE_CODE_SUBAGENT_MODEL`  | Always (same value as `ANTHROPIC_MODEL`)             |
-| `ANTHROPIC_SMALL_FAST_MODEL`  | Third-party providers only                           |
+| `ANTHROPIC_BASE_URL`            | Third-party providers only (unset for native)      |
+| `ANTHROPIC_AUTH_TOKEN`          | Third-party providers only (avoids API key prompt) |
+| `ANTHROPIC_API_KEY`             | Native Anthropic only                              |
+| `ANTHROPIC_MODEL`               | Always                                             |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL`  | Third-party — maps to `opus_model` in config       |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL`| Third-party — maps to `sonnet_model` in config     |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Third-party — maps to `haiku_model` in config      |
+| `CLAUDE_CODE_SUBAGENT_MODEL`    | Third-party — uses `sonnet_model`                  |
+| `ANTHROPIC_SMALL_FAST_MODEL`    | Third-party — uses `haiku_model`                   |
 
 State is persisted in `~/.claude-provider/active` so `ccs` works across shell sessions. Run `ccs reset` to clear it, or `ccs purge` to remove all ccs data.
 

@@ -123,11 +123,15 @@ get_cfg() {
 
 write_active() {
     local provider="$1" model="$2" base_url="$3" api_key="$4"
+    local opus="$5" sonnet="$6" haiku="$7"
     cat > "$ACTIVE_FILE" <<EOF
 PROVIDER=$provider
 MODEL=$model
 BASE_URL=$base_url
 API_KEY=$api_key
+OPUS_MODEL=$opus
+SONNET_MODEL=$sonnet
+HAIKU_MODEL=$haiku
 EOF
     chmod 600 "$ACTIVE_FILE"
 }
@@ -137,14 +141,22 @@ read_active() {
         return 1
     fi
     ACTIVE_PROVIDER="" ACTIVE_MODEL="" ACTIVE_BASE_URL="" ACTIVE_API_KEY=""
+    ACTIVE_OPUS="" ACTIVE_SONNET="" ACTIVE_HAIKU=""
     while IFS='=' read -r key value; do
         case "$key" in
-            PROVIDER) ACTIVE_PROVIDER="$value" ;;
-            MODEL)    ACTIVE_MODEL="$value" ;;
-            BASE_URL) ACTIVE_BASE_URL="$value" ;;
-            API_KEY)  ACTIVE_API_KEY="$value" ;;
+            PROVIDER)     ACTIVE_PROVIDER="$value" ;;
+            MODEL)        ACTIVE_MODEL="$value" ;;
+            BASE_URL)     ACTIVE_BASE_URL="$value" ;;
+            API_KEY)      ACTIVE_API_KEY="$value" ;;
+            OPUS_MODEL)   ACTIVE_OPUS="$value" ;;
+            SONNET_MODEL) ACTIVE_SONNET="$value" ;;
+            HAIKU_MODEL)  ACTIVE_HAIKU="$value" ;;
         esac
     done < "$ACTIVE_FILE"
+    # Fallback: if tiers not set, use main model
+    ACTIVE_OPUS="${ACTIVE_OPUS:-$ACTIVE_MODEL}"
+    ACTIVE_SONNET="${ACTIVE_SONNET:-$ACTIVE_MODEL}"
+    ACTIVE_HAIKU="${ACTIVE_HAIKU:-$ACTIVE_MODEL}"
 }
 
 # --- Validation ---
@@ -171,55 +183,54 @@ model=claude-sonnet-4-6
 [anthropic]
 base_url=
 api_key=
-models=claude-sonnet-4-6,claude-opus-4-6,claude-haiku-4-5-20251001
 default_model=claude-sonnet-4-6
 
 [openrouter]
 base_url=https://openrouter.ai/api
 api_key=
-models=anthropic/claude-sonnet-4,openai/gpt-4o,google/gemini-2.5-pro
 default_model=anthropic/claude-sonnet-4
 
 [deepseek]
 base_url=https://api.deepseek.com/anthropic
 api_key=
-models=deepseek-chat,deepseek-reasoner
 default_model=deepseek-chat
+opus_model=deepseek-reasoner
+sonnet_model=deepseek-chat
+haiku_model=deepseek-chat
 
 [zai]
 base_url=https://api.z.ai/api/anthropic
 api_key=
-models=glm-5.1,glm-5,glm-4.7,glm-4.6
 default_model=glm-5.1
+opus_model=glm-5.1
+sonnet_model=glm-4.7
+haiku_model=glm-4.7
 
 [kimi]
 base_url=https://api.moonshot.ai/anthropic
 api_key=
-models=kimi-k2.5
 default_model=kimi-k2.5
 
 [qwen]
 base_url=https://dashscope-intl.aliyuncs.com/apps/anthropic
 api_key=
-models=qwen3.5-plus,qwen3-coder-plus
 default_model=qwen3.5-plus
+haiku_model=qwen3-coder-plus
 
 [minimax]
 base_url=https://api.minimax.io/anthropic
 api_key=
-models=MiniMax-M2.7,MiniMax-M2.5
 default_model=MiniMax-M2.7
+haiku_model=MiniMax-M2.5
 
 [doubao]
 base_url=https://ark.cn-beijing.volces.com/api/coding
 api_key=
-models=doubao-seed-code-preview-latest
 default_model=doubao-seed-code-preview-latest
 
 [custom]
 base_url=
 api_key=
-models=
 default_model=
 TMPL
         fi
@@ -252,27 +263,9 @@ validate_api_key() {
 resolve_model() {
     local provider="$1" model_arg="${2:-}"
     if [ -n "$model_arg" ]; then
-        # Warn if model is not in known list
-        local known
-        known=$(get_cfg "$provider" "models")
-        if [ -n "$known" ]; then
-            local found=0 m
-            OLD_IFS="$IFS"; IFS=","
-            for m in $known; do
-                if [ "$m" = "$model_arg" ]; then
-                    found=1
-                    break
-                fi
-            done
-            IFS="$OLD_IFS"
-            if [ "$found" = "0" ]; then
-                warn "Model '$model_arg' not in known list for '$provider': $known"
-            fi
-        fi
         printf '%s' "$model_arg"
         return
     fi
-    # Try provider default
     local dm
     dm=$(get_cfg "$provider" "default_model")
     if [ -n "$dm" ]; then
@@ -295,12 +288,18 @@ cmd_use() {
     validate_provider "$provider"
     validate_api_key "$provider"
 
-    local model base_url api_key
+    local model base_url api_key opus sonnet haiku
     model=$(resolve_model "$provider" "$model_arg")
     base_url=$(get_cfg "$provider" "base_url")
     api_key=$(get_cfg "$provider" "api_key")
+    opus=$(get_cfg "$provider" "opus_model")
+    sonnet=$(get_cfg "$provider" "sonnet_model")
+    haiku=$(get_cfg "$provider" "haiku_model")
+    opus="${opus:-$model}"
+    sonnet="${sonnet:-$model}"
+    haiku="${haiku:-$model}"
 
-    write_active "$provider" "$model" "$base_url" "$api_key"
+    write_active "$provider" "$model" "$base_url" "$api_key" "$opus" "$sonnet" "$haiku"
     write_defaults "$provider" "$model"
 
     info "Switched to ${C_BOLD}${provider}${C_RESET} / ${C_CYAN}${model}${C_RESET}"
@@ -420,9 +419,12 @@ cmd_launch() {
         fi
         validate_provider "$dp"
         validate_api_key "$dp"
-        local base_url api_key
+        local base_url api_key opus sonnet haiku
         base_url=$(get_cfg "$dp" "base_url")
         api_key=$(get_cfg "$dp" "api_key")
+        opus=$(get_cfg "$dp" "opus_model")
+        sonnet=$(get_cfg "$dp" "sonnet_model")
+        haiku=$(get_cfg "$dp" "haiku_model")
         if [ -z "$dm" ]; then
             dm=$(get_cfg "$dp" "default_model")
         fi
@@ -430,6 +432,9 @@ cmd_launch() {
         ACTIVE_MODEL="$dm"
         ACTIVE_BASE_URL="$base_url"
         ACTIVE_API_KEY="$api_key"
+        ACTIVE_OPUS="${opus:-$dm}"
+        ACTIVE_SONNET="${sonnet:-$dm}"
+        ACTIVE_HAIKU="${haiku:-$dm}"
     fi
 
     # Verify claude is available
@@ -446,8 +451,11 @@ cmd_launch() {
             ANTHROPIC_BASE_URL="$ACTIVE_BASE_URL" \
             ANTHROPIC_AUTH_TOKEN="$ACTIVE_API_KEY" \
             ANTHROPIC_MODEL="$ACTIVE_MODEL" \
-            CLAUDE_CODE_SUBAGENT_MODEL="$ACTIVE_MODEL" \
-            ANTHROPIC_SMALL_FAST_MODEL="$ACTIVE_MODEL" \
+            ANTHROPIC_DEFAULT_OPUS_MODEL="$ACTIVE_OPUS" \
+            ANTHROPIC_DEFAULT_SONNET_MODEL="$ACTIVE_SONNET" \
+            ANTHROPIC_DEFAULT_HAIKU_MODEL="$ACTIVE_HAIKU" \
+            CLAUDE_CODE_SUBAGENT_MODEL="$ACTIVE_SONNET" \
+            ANTHROPIC_SMALL_FAST_MODEL="$ACTIVE_HAIKU" \
             claude "$@"
     else
         # Native Anthropic — use ANTHROPIC_API_KEY, no BASE_URL override
@@ -469,9 +477,12 @@ cmd_env() {
             die "No active provider and no default configured."
         fi
         validate_api_key "$dp"
-        local base_url api_key
+        local base_url api_key opus sonnet haiku
         base_url=$(get_cfg "$dp" "base_url")
         api_key=$(get_cfg "$dp" "api_key")
+        opus=$(get_cfg "$dp" "opus_model")
+        sonnet=$(get_cfg "$dp" "sonnet_model")
+        haiku=$(get_cfg "$dp" "haiku_model")
         if [ -z "$dm" ]; then
             dm=$(get_cfg "$dp" "default_model")
         fi
@@ -479,6 +490,9 @@ cmd_env() {
         ACTIVE_MODEL="$dm"
         ACTIVE_BASE_URL="$base_url"
         ACTIVE_API_KEY="$api_key"
+        ACTIVE_OPUS="${opus:-$dm}"
+        ACTIVE_SONNET="${sonnet:-$dm}"
+        ACTIVE_HAIKU="${haiku:-$dm}"
     fi
 
     if [ -n "$ACTIVE_BASE_URL" ]; then
@@ -486,7 +500,11 @@ cmd_env() {
         printf "export ANTHROPIC_BASE_URL='%s'\n" "$ACTIVE_BASE_URL"
         printf "export ANTHROPIC_AUTH_TOKEN='%s'\n" "$ACTIVE_API_KEY"
         printf 'unset ANTHROPIC_API_KEY 2>/dev/null || true\n'
-        printf "export ANTHROPIC_SMALL_FAST_MODEL='%s'\n" "$ACTIVE_MODEL"
+        printf "export ANTHROPIC_DEFAULT_OPUS_MODEL='%s'\n" "$ACTIVE_OPUS"
+        printf "export ANTHROPIC_DEFAULT_SONNET_MODEL='%s'\n" "$ACTIVE_SONNET"
+        printf "export ANTHROPIC_DEFAULT_HAIKU_MODEL='%s'\n" "$ACTIVE_HAIKU"
+        printf "export CLAUDE_CODE_SUBAGENT_MODEL='%s'\n" "$ACTIVE_SONNET"
+        printf "export ANTHROPIC_SMALL_FAST_MODEL='%s'\n" "$ACTIVE_HAIKU"
     else
         # Native Anthropic: ANTHROPIC_API_KEY, unset AUTH_TOKEN
         printf 'unset ANTHROPIC_BASE_URL 2>/dev/null || true\n'
@@ -494,7 +512,6 @@ cmd_env() {
         printf 'unset ANTHROPIC_AUTH_TOKEN 2>/dev/null || true\n'
     fi
     printf "export ANTHROPIC_MODEL='%s'\n" "$ACTIVE_MODEL"
-    printf "export CLAUDE_CODE_SUBAGENT_MODEL='%s'\n" "$ACTIVE_MODEL"
 }
 
 cmd_help() {
@@ -565,10 +582,18 @@ cmd_version() {
 main() {
     require_config
 
-    local cmd="${1:-launch}"
+    # No args or first arg starts with - → launch (pass all args to claude)
+    case "${1:-}" in
+        ""|-*)
+            cmd_launch "$@"
+            return
+            ;;
+    esac
+
+    local cmd="$1"
+    shift
     case "$cmd" in
         use)
-            shift
             cmd_use "$@"
             ;;
         list|ls)
@@ -581,7 +606,6 @@ main() {
             cmd_config
             ;;
         launch|run)
-            shift
             cmd_launch "$@"
             ;;
         env)

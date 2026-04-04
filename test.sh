@@ -117,6 +117,9 @@ active=$(cat "$TEST_CONFIG_DIR/.claude-provider/active")
 assert_contains "active has correct provider" "PROVIDER=zai" "$active"
 assert_contains "active has correct base_url" "BASE_URL=https://api.z.ai/api/anthropic" "$active"
 assert_contains "active has correct model" "MODEL=glm-5.1" "$active"
+assert_contains "active has opus_model" "OPUS_MODEL=glm-5.1" "$active"
+assert_contains "active has sonnet_model" "SONNET_MODEL=glm-4.7" "$active"
+assert_contains "active has haiku_model" "HAIKU_MODEL=glm-4.7" "$active"
 config=$(cat "$TEST_CONFIG_DIR/.claude-provider/config")
 assert_contains "use also sets default provider" "provider=zai" "$config"
 assert_contains "use also sets default model" "model=glm-5.1" "$config"
@@ -173,7 +176,11 @@ assert_not_contains "env does not use ANTHROPIC_API_KEY export" "export ANTHROPI
 assert_contains "env unsets ANTHROPIC_API_KEY" "unset ANTHROPIC_API_KEY" "$out"
 assert_contains "env sets BASE_URL" "ANTHROPIC_BASE_URL" "$out"
 assert_contains "env sets MODEL" "ANTHROPIC_MODEL" "$out"
-assert_contains "env sets SMALL_FAST_MODEL" "ANTHROPIC_SMALL_FAST_MODEL" "$out"
+assert_contains "env sets OPUS model" "ANTHROPIC_DEFAULT_OPUS_MODEL='glm-5.1'" "$out"
+assert_contains "env sets SONNET model" "ANTHROPIC_DEFAULT_SONNET_MODEL='glm-4.7'" "$out"
+assert_contains "env sets HAIKU model" "ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-4.7'" "$out"
+assert_contains "env sets SMALL_FAST to haiku" "ANTHROPIC_SMALL_FAST_MODEL='glm-4.7'" "$out"
+assert_contains "env sets SUBAGENT to sonnet" "CLAUDE_CODE_SUBAGENT_MODEL='glm-4.7'" "$out"
 assert_contains "env sets SUBAGENT_MODEL" "CLAUDE_CODE_SUBAGENT_MODEL" "$out"
 teardown
 

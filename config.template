@@ -4,11 +4,14 @@
 #   [provider_name]
 #   base_url=https://...
 #   api_key=your-api-key-here
-#   models=model-a,model-b,model-c
 #   default_model=model-a
+#   opus_model=model-a     (optional, for /models opus tier)
+#   sonnet_model=model-b   (optional, for /models sonnet tier + subagents)
+#   haiku_model=model-c    (optional, for /models haiku tier + fast tasks)
 #
 # Special: [anthropic] does not need base_url (uses native API)
 # Special: [_defaults] section sets global defaults
+# Tier models are optional — they fall back to default_model if empty
 
 [_defaults]
 provider=anthropic
@@ -17,53 +20,52 @@ model=claude-sonnet-4-6
 [anthropic]
 base_url=
 api_key=
-models=claude-sonnet-4-6,claude-opus-4-6,claude-haiku-4-5-20251001
 default_model=claude-sonnet-4-6
 
 [openrouter]
 base_url=https://openrouter.ai/api
 api_key=
-models=anthropic/claude-sonnet-4,openai/gpt-4o,google/gemini-2.5-pro
 default_model=anthropic/claude-sonnet-4
 
 [deepseek]
 base_url=https://api.deepseek.com/anthropic
 api_key=
-models=deepseek-chat,deepseek-reasoner
 default_model=deepseek-chat
+opus_model=deepseek-reasoner
+sonnet_model=deepseek-chat
+haiku_model=deepseek-chat
 
 [zai]
 base_url=https://api.z.ai/api/anthropic
 api_key=
-models=glm-5.1,glm-5,glm-4.7,glm-4.6
 default_model=glm-5.1
+opus_model=glm-5.1
+sonnet_model=glm-4.7
+haiku_model=glm-4.7
 
 [kimi]
 base_url=https://api.moonshot.ai/anthropic
 api_key=
-models=kimi-k2.5
 default_model=kimi-k2.5
 
 [qwen]
 base_url=https://dashscope-intl.aliyuncs.com/apps/anthropic
 api_key=
-models=qwen3.5-plus,qwen3-coder-plus
 default_model=qwen3.5-plus
+haiku_model=qwen3-coder-plus
 
 [minimax]
 base_url=https://api.minimax.io/anthropic
 api_key=
-models=MiniMax-M2.7,MiniMax-M2.5
 default_model=MiniMax-M2.7
+haiku_model=MiniMax-M2.5
 
 [doubao]
 base_url=https://ark.cn-beijing.volces.com/api/coding
 api_key=
-models=doubao-seed-code-preview-latest
 default_model=doubao-seed-code-preview-latest
 
 [custom]
 base_url=
 api_key=
-models=
 default_model=
