@@ -2,7 +2,7 @@
 
 Minimal, zero-dependency provider switching for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). One shell script to rule them all.
 
-Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, or any custom endpoint) with a single command. **`claude` always works as-is** — `ccs` is a sidecar that only injects env vars when you explicitly run `ccs launch`.
+Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, or any custom endpoint) with a single command. **`claude` always works as-is** — `ccs` is a sidecar that only injects env vars when you explicitly run `ccs`.
 
 Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-code-switch), stripped down to the essentials: **switch provider, set model, launch claude**.
 
@@ -12,7 +12,7 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 - **Default model**: configurable globally and per provider
 - **Zero dependencies**: pure POSIX sh — no jq, no python, no node
 - **Zero interference**: `claude` always works normally — `ccs` never touches your shell or Claude config
-- **Direct launch**: `ccs launch` starts Claude Code with the right env vars (scoped to that process)
+- **Direct launch**: `ccs` starts Claude Code with the right env vars (scoped to that process)
 - **Shell integration** (optional): `eval "$(ccs env)"` exports vars to your current session
 - **API key validation**: clear errors when a provider is not configured
 - **Masked secrets**: `ccs status` never leaks your full API key
@@ -56,11 +56,10 @@ ccs [args...]               Launch claude with active provider (default)
 ccs <command> [arguments]
 
 COMMANDS
-    use <provider> [model]      Switch to a provider (optionally override model)
+    use <provider> [model]      Switch to a provider (saves as default)
     list                        List configured providers
     status                      Show active provider and model
     config                      Open config file in $EDITOR
-    default <provider> [model]  Set default provider and model
     launch [args...]            Launch claude with active provider env vars
     env                         Print export statements for current shell
     reset                       Clear active provider (back to vanilla claude)
@@ -82,10 +81,6 @@ ccs use kimi                         # Kimi K2.5
 ccs use qwen                         # Qwen 3.5 Plus
 ccs use minimax                      # MiniMax M2.7
 ccs use doubao                       # Doubao Seed Code (ByteDance)
-
-# Set persistent defaults
-ccs default openrouter               # Set OpenRouter as default provider
-ccs default anthropic claude-opus-4-6 # Set default provider + model
 
 # Check state
 ccs list                              # See all providers and their status
@@ -181,7 +176,7 @@ Add to `~/.zshrc` or `~/.bashrc` so `ccs use` automatically exports env vars to 
 
 ```sh
 ccs() {
-    if [ "${1:-}" = "use" ] || [ "${1:-}" = "default" ]; then
+    if [ "${1:-}" = "use" ]; then
         command ccs "$@" && eval "$(command ccs env)"
     else
         command ccs "$@"
@@ -191,7 +186,7 @@ ccs() {
 
 ## How it works
 
-`ccs launch` runs `exec env ... claude` — the env vars only exist in that child process. Your shell and `claude` are never affected.
+`ccs` runs `exec env ... claude` — the env vars only exist in that child process. Your shell and `claude` are never affected.
 
 ```
 claude          → normal Claude Code, no ccs involvement
@@ -207,7 +202,7 @@ ccs             → Claude Code with provider env vars (scoped to that process)
 | `CLAUDE_CODE_SUBAGENT_MODEL`  | Always (same value as `ANTHROPIC_MODEL`)             |
 | `ANTHROPIC_SMALL_FAST_MODEL`  | Third-party providers only                           |
 
-State is persisted in `~/.claude-provider/active` so `ccs launch` works across shell sessions. Run `ccs reset` to clear it, or `ccs purge` to remove all ccs data.
+State is persisted in `~/.claude-provider/active` so `ccs` works across shell sessions. Run `ccs reset` to clear it, or `ccs purge` to remove all ccs data.
 
 ## Contributing
 

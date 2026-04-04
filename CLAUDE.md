@@ -1,14 +1,14 @@
 # CLAUDE.md
 
-**Keep this file and README.md in sync with any code change.**
+**When changing commands, options, or behavior: always update CLAUDE.md, README.md, and `cmd_help()` in `ccs` together. Run `./test.sh` to verify.**
 
 ## Project overview
 
-`ccs` (Claude Code Switch) is a minimal POSIX sh script for switching Claude Code between AI providers. It is a **sidecar tool** — `claude` always works as-is with zero interference. `ccs` only injects env vars into the child process spawned by `ccs launch`.
+`ccs` (Claude Code Switch) is a minimal POSIX sh script for switching Claude Code between AI providers. It is a **sidecar tool** — `claude` always works as-is with zero interference. `ccs` only injects env vars into the child process spawned when running `ccs` (defaults to launch).
 
 ## Core principle
 
-**`claude` must always work on its own.** `ccs` never modifies the user's shell, dotfiles, or Claude Code config. All state lives in `~/.claude-provider/` and env vars only exist inside the `ccs launch` subprocess (`exec env ... claude`).
+**`claude` must always work on its own.** `ccs` never modifies the user's shell, dotfiles, or Claude Code config. All state lives in `~/.claude-provider/` and env vars only exist inside the `ccs` subprocess (`exec env ... claude`).
 
 ## Architecture
 
@@ -42,7 +42,7 @@ config.template     # Default config with all providers
 
 ## Commands
 
-`ccs use|list|status|config|default|launch|env|reset|purge|help|version`
+`ccs use|list|status|config|launch|env|reset|purge|help|version`
 
 ## Adding a new provider
 
