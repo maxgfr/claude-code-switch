@@ -2,7 +2,7 @@
 
 Minimal, zero-dependency provider switching for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). One shell script to rule them all.
 
-Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, or any custom endpoint) with a single command. Configure a default model per provider and globally.
+Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, or any custom endpoint) with a single command. **`claude` always works as-is** — `ccs` is a sidecar that only injects env vars when you explicitly run `ccs launch`.
 
 Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-code-switch), stripped down to the essentials: **switch provider, set model, launch claude**.
 
@@ -11,8 +11,9 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 - **9 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, Custom
 - **Default model**: configurable globally and per provider
 - **Zero dependencies**: pure POSIX sh — no jq, no python, no node
-- **Shell integration**: `eval "$(ccs env)"` exports vars to your current session
-- **Direct launch**: `ccs launch` starts Claude Code with the right env vars
+- **Zero interference**: `claude` always works normally — `ccs` never touches your shell or Claude config
+- **Direct launch**: `ccs launch` starts Claude Code with the right env vars (scoped to that process)
+- **Shell integration** (optional): `eval "$(ccs env)"` exports vars to your current session
 - **API key validation**: clear errors when a provider is not configured
 - **Masked secrets**: `ccs status` never leaks your full API key
 
@@ -45,12 +46,13 @@ ccs config
 ccs use openrouter
 
 # 3. Launch Claude Code
-ccs launch
+ccs
 ```
 
 ## Usage
 
 ```
+ccs [args...]               Launch claude with active provider (default)
 ccs <command> [arguments]
 
 COMMANDS
@@ -61,6 +63,8 @@ COMMANDS
     default <provider> [model]  Set default provider and model
     launch [args...]            Launch claude with active provider env vars
     env                         Print export statements for current shell
+    reset                       Clear active provider (back to vanilla claude)
+    purge                       Remove all ccs data (~/.claude-provider/)
     help                        Show help
     version                     Show version
 ```
@@ -88,8 +92,8 @@ ccs list                              # See all providers and their status
 ccs status                            # See active provider, model, masked API key
 
 # Launch Claude Code
-ccs launch                            # Launch with active provider
-ccs launch --print "hello world"      # Pass flags through to claude
+ccs                                   # Launch with active provider
+ccs --print "hello world"             # Pass flags through to claude
 
 # Export to current shell
 eval "$(ccs env)"                     # Export env vars to current session
@@ -121,7 +125,7 @@ All providers expose an Anthropic-compatible Messages API endpoint, confirmed wo
 
 ```sh
 ccs use zai glm-5.1
-ccs launch
+ccs
 ```
 
 ### Doubao (ByteDance/Volcengine)
@@ -134,7 +138,7 @@ ccs launch
 
 ```sh
 ccs use doubao
-ccs launch
+ccs
 ```
 
 ## Configuration
@@ -187,17 +191,23 @@ ccs() {
 
 ## How it works
 
-`ccs` sets these environment variables before launching Claude Code:
+`ccs launch` runs `exec env ... claude` — the env vars only exist in that child process. Your shell and `claude` are never affected.
+
+```
+claude          → normal Claude Code, no ccs involvement
+ccs             → Claude Code with provider env vars (scoped to that process)
+```
 
 | Variable                      | When                                                 |
 |-------------------------------|------------------------------------------------------|
-| `ANTHROPIC_BASE_URL`          | All providers except `anthropic` (unset for native)  |
-| `ANTHROPIC_API_KEY`           | Always                                               |
+| `ANTHROPIC_BASE_URL`          | Third-party providers only (unset for native)        |
+| `ANTHROPIC_AUTH_TOKEN`        | Third-party providers only (avoids API key prompt)   |
+| `ANTHROPIC_API_KEY`           | Native Anthropic only                                |
 | `ANTHROPIC_MODEL`             | Always                                               |
 | `CLAUDE_CODE_SUBAGENT_MODEL`  | Always (same value as `ANTHROPIC_MODEL`)             |
-| `ANTHROPIC_SMALL_FAST_MODEL`  | Non-Anthropic providers only                         |
+| `ANTHROPIC_SMALL_FAST_MODEL`  | Third-party providers only                           |
 
-State is persisted in `~/.claude-provider/active` so `ccs launch` works across shell sessions.
+State is persisted in `~/.claude-provider/active` so `ccs launch` works across shell sessions. Run `ccs reset` to clear it, or `ccs purge` to remove all ccs data.
 
 ## Contributing
 

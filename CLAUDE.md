@@ -1,15 +1,22 @@
 # CLAUDE.md
 
+**Keep this file and README.md in sync with any code change.**
+
 ## Project overview
 
-`ccs` (Claude Code Switch) is a minimal POSIX sh script for switching Claude Code between AI providers. It manages environment variables (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, etc.) and persists state in `~/.claude-provider/`.
+`ccs` (Claude Code Switch) is a minimal POSIX sh script for switching Claude Code between AI providers. It is a **sidecar tool** — `claude` always works as-is with zero interference. `ccs` only injects env vars into the child process spawned by `ccs launch`.
+
+## Core principle
+
+**`claude` must always work on its own.** `ccs` never modifies the user's shell, dotfiles, or Claude Code config. All state lives in `~/.claude-provider/` and env vars only exist inside the `ccs launch` subprocess (`exec env ... claude`).
 
 ## Architecture
 
-- **Single script**: `ccs` (~550 lines of POSIX sh)
+- **Single script**: `ccs` (~600 lines of POSIX sh)
 - **Config**: INI format at `~/.claude-provider/config`, parsed with shell builtins (`while read` + `case`)
-- **State**: `~/.claude-provider/active` stores current provider/model
+- **State**: `~/.claude-provider/active` stores current provider/model (removed by `ccs reset`)
 - **No external dependencies**: no jq, no python, no node
+- **Zero footprint**: `ccs reset` or `ccs purge` removes all traces
 
 ## Key design decisions
 
@@ -17,7 +24,11 @@
 - `local` keyword used despite not being strictly POSIX (supported everywhere in practice)
 - Config values stored in `cfg_<section>_<key>` shell variables, retrieved via `get_cfg()`
 - All providers must expose an **Anthropic Messages API** compatible endpoint
-- `anthropic` provider is special: `ANTHROPIC_BASE_URL` is **unset** (not empty)
+- `anthropic` provider is special: uses `ANTHROPIC_API_KEY`, no `ANTHROPIC_BASE_URL`
+- Third-party providers use `ANTHROPIC_AUTH_TOKEN` (not `ANTHROPIC_API_KEY`) to avoid the "Detected a custom API key" interactive prompt
+- Section names must be `[a-zA-Z0-9_]` only (no hyphens — invalid in shell variable names)
+- Color variables use `$(printf '\033[...]')` to store real escape bytes (not literal strings)
+- All `printf` calls pass color variables via `%s`, never in the format string
 
 ## File structure
 
@@ -31,7 +42,7 @@ config.template     # Default config with all providers
 
 ## Commands
 
-`ccs use|list|status|config|default|launch|env|help|version`
+`ccs use|list|status|config|default|launch|env|reset|purge|help|version`
 
 ## Adding a new provider
 
