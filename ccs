@@ -500,15 +500,15 @@ cmd_env() {
     fi
 
     if [ -n "$ACTIVE_BASE_URL" ]; then
-        printf 'export ANTHROPIC_BASE_URL="%s"\n' "$ACTIVE_BASE_URL"
+        printf "export ANTHROPIC_BASE_URL='%s'\n" "$ACTIVE_BASE_URL"
     else
         printf 'unset ANTHROPIC_BASE_URL 2>/dev/null || true\n'
     fi
-    printf 'export ANTHROPIC_API_KEY="%s"\n' "$ACTIVE_API_KEY"
-    printf 'export ANTHROPIC_MODEL="%s"\n' "$ACTIVE_MODEL"
-    printf 'export CLAUDE_CODE_SUBAGENT_MODEL="%s"\n' "$ACTIVE_MODEL"
+    printf "export ANTHROPIC_API_KEY='%s'\n" "$ACTIVE_API_KEY"
+    printf "export ANTHROPIC_MODEL='%s'\n" "$ACTIVE_MODEL"
+    printf "export CLAUDE_CODE_SUBAGENT_MODEL='%s'\n" "$ACTIVE_MODEL"
     if [ -n "$ACTIVE_BASE_URL" ]; then
-        printf 'export ANTHROPIC_SMALL_FAST_MODEL="%s"\n' "$ACTIVE_MODEL"
+        printf "export ANTHROPIC_SMALL_FAST_MODEL='%s'\n" "$ACTIVE_MODEL"
     fi
 }
 
