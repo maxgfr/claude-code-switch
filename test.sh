@@ -194,7 +194,7 @@ assert_contains "native uses ANTHROPIC_API_KEY" "export ANTHROPIC_API_KEY" "$out
 assert_not_contains "native does not use AUTH_TOKEN export" "export ANTHROPIC_AUTH_TOKEN" "$out"
 assert_contains "native unsets BASE_URL" "unset ANTHROPIC_BASE_URL" "$out"
 assert_contains "native unsets AUTH_TOKEN" "unset ANTHROPIC_AUTH_TOKEN" "$out"
-assert_not_contains "native does not set SMALL_FAST_MODEL" "ANTHROPIC_SMALL_FAST_MODEL" "$out"
+assert_not_contains "native does not export SMALL_FAST_MODEL" "export ANTHROPIC_SMALL_FAST_MODEL" "$out"
 teardown
 
 # -- Use persists as default --
@@ -248,6 +248,65 @@ teardown
 printf '\033[1m[unknown command]\033[0m\n'
 setup
 assert_exit "unknown command fails" "1" "$CCS" doesnotexist
+teardown
+
+# -- Env native unsets stale tier vars --
+printf '\033[1m[env native unsets tier vars]\033[0m\n'
+setup
+set_all_keys "sk-ant-test"
+"$CCS" use anthropic >/dev/null 2>&1
+out=$("$CCS" env)
+assert_contains "native unsets OPUS tier" "unset ANTHROPIC_DEFAULT_OPUS_MODEL" "$out"
+assert_contains "native unsets SONNET tier" "unset ANTHROPIC_DEFAULT_SONNET_MODEL" "$out"
+assert_contains "native unsets HAIKU tier" "unset ANTHROPIC_DEFAULT_HAIKU_MODEL" "$out"
+assert_contains "native unsets SUBAGENT model" "unset CLAUDE_CODE_SUBAGENT_MODEL" "$out"
+assert_contains "native unsets SMALL_FAST model" "unset ANTHROPIC_SMALL_FAST_MODEL" "$out"
+teardown
+
+# -- Launch scrubs inherited env (fake claude shim) --
+printf '\033[1m[launch scrubs inherited env]\033[0m\n'
+setup
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+set_all_keys "sk-ant-test"
+"$CCS" use anthropic >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" ANTHROPIC_BASE_URL="http://stale.example" \
+      ANTHROPIC_DEFAULT_OPUS_MODEL="stale-model" "$CCS" launch 2>/dev/null)
+assert_not_contains "native launch scrubs stale BASE_URL" "stale.example" "$out"
+assert_not_contains "native launch scrubs stale tier model" "stale-model" "$out"
+assert_contains "native launch keeps API key" "ANTHROPIC_API_KEY=sk-ant-test" "$out"
+"$CCS" use zai >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" ANTHROPIC_API_KEY="stale-api-key" "$CCS" launch 2>/dev/null)
+assert_not_contains "third-party launch scrubs stale API_KEY" "stale-api-key" "$out"
+assert_contains "third-party launch sets AUTH_TOKEN" "ANTHROPIC_AUTH_TOKEN=sk-ant-test" "$out"
+rm -rf "$SHIM_DIR"
+teardown
+
+# -- ccs -h / -v are ccs flags, not claude passthrough --
+printf '\033[1m[-h and -v flags]\033[0m\n'
+setup
+out=$("$CCS" -h)
+assert_contains "-h shows ccs help" "COMMANDS" "$out"
+out=$("$CCS" --help)
+assert_contains "--help shows ccs help" "COMMANDS" "$out"
+out=$("$CCS" -v)
+assert_contains "-v shows ccs version" "ccs" "$out"
+out=$("$CCS" --version)
+assert_contains "--version shows ccs version" "ccs" "$out"
+teardown
+
+# -- Vanilla fallback when nothing configured --
+printf '\033[1m[vanilla fallback]\033[0m\n'
+setup
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\necho VANILLA_CLAUDE_RAN\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+# No API key configured anywhere → ccs should warn and run claude untouched
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>&1)
+assert_contains "unconfigured ccs runs vanilla claude" "VANILLA_CLAUDE_RAN" "$out"
+assert_contains "vanilla fallback warns" "vanilla" "$out"
+rm -rf "$SHIM_DIR"
 teardown
 
 # -- Notify: install --
