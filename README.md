@@ -73,7 +73,7 @@ COMMANDS
 
 ```sh
 # Switch provider
-ccs use anthropic                     # Use default model (claude-sonnet-4-6)
+ccs use anthropic                     # Use default model (claude-sonnet-5)
 ccs use anthropic claude-opus-4-6     # Override model
 ccs use openrouter openai/gpt-4o     # OpenRouter with specific model
 ccs use deepseek deepseek-reasoner   # DeepSeek R1
@@ -101,7 +101,7 @@ All providers expose an Anthropic-compatible Messages API endpoint, confirmed wo
 
 | Provider     | Base URL                                                  | Default Model                    |
 |--------------|-----------------------------------------------------------|----------------------------------|
-| `anthropic`  | *(native — no override)*                                  | `claude-sonnet-4-6`              |
+| `anthropic`  | *(native — no override)*                                  | `claude-sonnet-5`              |
 | `openrouter` | `https://openrouter.ai/api`                               | `anthropic/claude-sonnet-4`      |
 | `deepseek`   | `https://api.deepseek.com/anthropic`                      | `deepseek-chat`                  |
 | `zai`        | `https://api.z.ai/api/anthropic`                          | `glm-5.1`                        |
@@ -144,12 +144,12 @@ Located at `~/.claude-provider/config`. Simple INI format, editable by hand:
 ```ini
 [_defaults]
 provider=anthropic
-model=claude-sonnet-4-6
+model=claude-sonnet-5
 
 [anthropic]
 base_url=
 api_key=sk-ant-your-key-here
-model=claude-sonnet-4-6
+model=claude-sonnet-5
 
 [openrouter]
 base_url=https://openrouter.ai/api
@@ -224,6 +224,10 @@ ccs() {
 claude          → normal Claude Code, no ccs involvement
 ccs             → Claude Code with provider env vars (scoped to that process)
 ```
+
+`ccs` also **scrubs conflicting inherited vars** (`env -u`) before launching: a stale `ANTHROPIC_BASE_URL` or tier model left in your shell by a previous `eval "$(ccs env)"` for another provider can't leak into the launch. Likewise, `eval "$(ccs env)"` for native Anthropic unsets the third-party tier vars it may have exported before.
+
+If **no provider is configured at all** (no active provider, no API key in the defaults), `ccs` warns and launches vanilla `claude` instead of failing.
 
 | Variable                      | When                                                 |
 |-------------------------------|------------------------------------------------------|
