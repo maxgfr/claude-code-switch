@@ -1,0 +1,26 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # SC3043 (`local` in POSIX sh) is a documented convention — see CLAUDE.md
+      - name: Shellcheck
+        if: runner.os == 'Linux'
+        run: shellcheck -s sh -e SC3043 ccs test.sh
+
+      - name: Run test suite
+        run: ./test.sh

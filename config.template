@@ -14,12 +14,12 @@
 
 [_defaults]
 provider=anthropic
-model=claude-sonnet-4-6
+model=claude-sonnet-5
 
 [anthropic]
 base_url=
 api_key=
-model=claude-sonnet-4-6
+model=claude-sonnet-5
 
 [openrouter]
 base_url=https://openrouter.ai/api

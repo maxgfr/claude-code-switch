@@ -24,6 +24,9 @@
 
 - POSIX sh compatible (no bash-isms: no `[[ ]]`, no arrays, no `${var//pattern}`)
 - `local` keyword used despite not being strictly POSIX (supported everywhere in practice)
+- `env -u` used in `cmd_launch` to scrub conflicting inherited vars (same spirit as `local`: not strictly POSIX, supported by GNU/BSD/macOS/busybox). Native launch unsets third-party vars and vice versa; `cmd_env` native branch unsets the tier vars a third-party eval may have exported
+- `ccs -h|--help|-v|--version` are intercepted in `main()` BEFORE the generic `-*` claude passthrough — everything else starting with `-` goes to claude
+- Unconfigured launch (no active provider + no default api_key) falls back to vanilla `claude` with a warning instead of dying (`launch_vanilla()`)
 - Config values stored in `cfg_<section>_<key>` shell variables, retrieved via `get_cfg()`
 - All providers must expose an **Anthropic Messages API** compatible endpoint
 - `anthropic` provider is special: uses `ANTHROPIC_API_KEY`, no `ANTHROPIC_BASE_URL`
@@ -37,9 +40,11 @@
 ```
 ccs                 # Main script — all logic here
 config.template     # Default config with all providers
+test.sh             # Integration test suite (run in CI)
 .releaserc          # semantic-release config
 .version-hook.sh    # Injects version into ccs during release
 .github/workflows/  # release.yml (semantic-release on push to main)
+                    # test.yml (test.sh + shellcheck on PRs, ubuntu + macos)
 ```
 
 ## Commands
