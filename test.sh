@@ -84,7 +84,7 @@ printf '\033[1m[config creation]\033[0m\n'
 setup
 assert_exit "first run creates config" "0" "$CCS" help
 assert_eq "config file exists" "true" "$([ -f "$TEST_CONFIG_DIR/.claude-provider/config" ] && echo true || echo false)"
-assert_eq "config dir is 700" "700" "$(stat -f '%A' "$TEST_CONFIG_DIR/.claude-provider" 2>/dev/null || stat -c '%a' "$TEST_CONFIG_DIR/.claude-provider" 2>/dev/null)"
+assert_eq "config dir is 700" "700" "$(stat -c '%a' "$TEST_CONFIG_DIR/.claude-provider" 2>/dev/null || stat -f '%A' "$TEST_CONFIG_DIR/.claude-provider" 2>/dev/null)"
 teardown
 
 # -- Version --
