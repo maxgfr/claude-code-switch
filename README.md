@@ -62,6 +62,7 @@ COMMANDS
     config                      Open config file in $EDITOR
     launch [args...]            Launch claude with active provider env vars
     env                         Print export statements for current shell
+    notify on|off|status|test   Desktop notifications when Claude needs you
     reset                       Clear active provider (back to vanilla claude)
     purge                       Remove all ccs data (~/.claude-provider/)
     help                        Show help
@@ -169,6 +170,37 @@ haiku_model=glm-4.7
 - **`model=`** — main model (maps to sonnet/default tier in `/models`)
 - **`opus_model=`** — optional, for `/models` opus tier (falls back to `model`)
 - **`haiku_model=`** — optional, for `/models` haiku tier + fast tasks (falls back to `model`)
+
+## Desktop notifications
+
+Get a desktop notification + dock badge when Claude Code **finishes a task** or **asks you something** — and stay silent for subagents and background tasks (no more notification spam from parallel workflows).
+
+```sh
+ccs notify on           # Auto-detect terminal, install hooks
+ccs notify on iterm2    # Or pin: ghostty | iterm2 | wezterm | kitty | macos | bell
+ccs notify test         # Fire a test notification
+ccs notify status       # Show current state
+ccs notify off          # Remove everything, restore previous settings
+```
+
+**Requires [jq](https://jqlang.org)** (`brew install jq`) — only for this command, the rest of `ccs` stays zero-dependency.
+
+| Terminal | Notification | Dock badge on bell |
+|--------------|--------------------------|---------------------|
+| Ghostty | OSC 777 | ✅ (`bell-features = attention`) |
+| WezTerm | OSC 777 | bounce (configurable) |
+| iTerm2 | OSC 9 | ✅ bounce |
+| kitty | OSC 99 | configurable |
+| Terminal.app | `osascript` | ✅ |
+| anything else| bell only | terminal-dependent |
+
+How it works:
+
+- A `Stop` hook notifies when the main conversation turn ends. Subagents fire `SubagentStop`, which is deliberately **not** hooked — they never notify.
+- A `Notification` hook notifies only when Claude needs *you* (`permission_prompt`, `agent_needs_input`, `elicitation_dialog`, `idle_prompt`) and ignores `agent_completed`, which fires for every background task.
+- The badge only shows while the terminal is unfocused, and clears when you come back.
+
+> **Note:** `ccs notify on` is the **single exception** to the zero-interference principle: it edits `~/.claude/settings.json` (hooks + `preferredNotifChannel`). It is explicit opt-in, backs up your settings to `~/.claude-provider/settings-backup.json`, and `ccs notify off` restores the previous state. Hook scripts live in `~/.claude-provider/hooks/`.
 
 ## Shell integration
 

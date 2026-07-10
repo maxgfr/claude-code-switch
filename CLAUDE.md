@@ -10,6 +10,8 @@
 
 **`claude` must always work on its own.** `ccs` never modifies the user's shell, dotfiles, or Claude Code config. All state lives in `~/.claude-provider/` and env vars only exist inside the `ccs` subprocess (`exec env ... claude`).
 
+**Single exception:** `ccs notify on|off` edits `~/.claude/settings.json` (hooks + `preferredNotifChannel`). Explicit opt-in, backed up to `~/.claude-provider/settings-backup.json`, fully reversed by `notify off`; `purge` detaches the hooks first. Requires jq (soft dependency — only the notify command).
+
 ## Architecture
 
 - **Single script**: `ccs` (~600 lines of POSIX sh)
@@ -42,7 +44,15 @@ config.template     # Default config with all providers
 
 ## Commands
 
-`ccs use|list|status|config|launch|env|reset|purge|help|version`
+`ccs use|list|status|config|launch|env|notify|reset|purge|help|version`
+
+## Notifications (`ccs notify`)
+
+- `notify on [terminal]` generates three POSIX sh hook scripts (heredocs embedded in `ccs`) into `~/.claude-provider/hooks/`: `notify-emit.sh` (terminal detection + OSC emission), `notify-stop.sh` (Stop hook), `notify-attention.sh` (Notification hook, filters `notification_type`), then jq-merges references into `~/.claude/settings.json`
+- `SubagentStop` is deliberately NOT hooked and `agent_completed` notifications are ignored — subagents/background tasks must stay silent
+- Terminal methods: ghostty/wezterm → OSC 777, iterm2 → OSC 9, kitty → OSC 99, macos → osascript, bell → BEL only. All also emit a standalone BEL (dock badge/bounce). `auto` (default) detects at hook runtime via `TERM_PROGRAM`/`KITTY_WINDOW_ID`
+- Idempotent merge: entries whose command contains `/.claude-provider/hooks/` are replaced, never duplicated; user's other settings are preserved
+- `notify off` restores the previous `preferredNotifChannel` (saved in `~/.claude-provider/notify-state` on first install)
 
 ## Adding a new provider
 

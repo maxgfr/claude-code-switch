@@ -250,6 +250,102 @@ setup
 assert_exit "unknown command fails" "1" "$CCS" doesnotexist
 teardown
 
+# -- Notify: install --
+printf '\033[1m[notify on]\033[0m\n'
+setup
+SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
+HOOKS="$TEST_CONFIG_DIR/.claude-provider/hooks"
+"$CCS" notify on >/dev/null 2>&1
+assert_eq "emit hook created and executable" "true" "$([ -x "$HOOKS/notify-emit.sh" ] && echo true || echo false)"
+assert_eq "stop hook created and executable" "true" "$([ -x "$HOOKS/notify-stop.sh" ] && echo true || echo false)"
+assert_eq "attention hook created and executable" "true" "$([ -x "$HOOKS/notify-attention.sh" ] && echo true || echo false)"
+assert_exit "settings.json is valid JSON" "0" jq empty "$SETTINGS"
+settings=$(cat "$SETTINGS")
+assert_contains "settings references stop hook" "notify-stop.sh" "$settings"
+assert_contains "settings references attention hook" "notify-attention.sh" "$settings"
+assert_contains "settings disables built-in channel" "notifications_disabled" "$settings"
+assert_not_contains "settings has no SubagentStop hook" "SubagentStop" "$settings"
+teardown
+
+# -- Notify: preserves existing settings + idempotent --
+printf '\033[1m[notify preserves settings]\033[0m\n'
+setup
+SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
+mkdir -p "$TEST_CONFIG_DIR/.claude"
+printf '{"model":"opus","preferredNotifChannel":"iterm2"}\n' > "$SETTINGS"
+"$CCS" notify on >/dev/null 2>&1
+assert_eq "existing keys preserved" "opus" "$(jq -r '.model' "$SETTINGS")"
+"$CCS" notify on >/dev/null 2>&1
+assert_eq "idempotent: one Stop entry" "1" "$(jq '.hooks.Stop | length' "$SETTINGS")"
+assert_eq "idempotent: one Notification entry" "1" "$(jq '.hooks.Notification | length' "$SETTINGS")"
+"$CCS" notify off >/dev/null 2>&1
+assert_eq "off restores previous channel" "iterm2" "$(jq -r '.preferredNotifChannel' "$SETTINGS")"
+assert_eq "off removes hooks key when empty" "null" "$(jq -r '.hooks' "$SETTINGS")"
+assert_eq "off keeps other settings" "opus" "$(jq -r '.model' "$SETTINGS")"
+assert_eq "off removes hooks dir" "false" "$([ -d "$TEST_CONFIG_DIR/.claude-provider/hooks" ] && echo true || echo false)"
+teardown
+
+# -- Notify: off with no previous channel --
+printf '\033[1m[notify off restores absent channel]\033[0m\n'
+setup
+SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
+"$CCS" notify on >/dev/null 2>&1
+"$CCS" notify off >/dev/null 2>&1
+assert_eq "channel absent again after off" "null" "$(jq -r '.preferredNotifChannel' "$SETTINGS")"
+teardown
+
+# -- Notify: pinned terminal + validation --
+printf '\033[1m[notify terminal pinning]\033[0m\n'
+setup
+HOOKS="$TEST_CONFIG_DIR/.claude-provider/hooks"
+"$CCS" notify on iterm2 >/dev/null 2>&1
+assert_contains "method pinned in emit hook" 'CCS_NOTIFY_METHOD="iterm2"' "$(cat "$HOOKS/notify-emit.sh")"
+out=$("$CCS" notify status)
+assert_contains "status shows on + method" "on (iterm2)" "$out"
+assert_exit "invalid terminal rejected" "1" "$CCS" notify on badterm
+assert_exit "invalid subcommand rejected" "1" "$CCS" notify badsub
+teardown
+
+# -- Notify: status when off --
+printf '\033[1m[notify status off]\033[0m\n'
+setup
+out=$("$CCS" notify status)
+assert_contains "status shows off" "off" "$out"
+teardown
+
+# -- Notify: hooks behavior --
+printf '\033[1m[notify hook scripts]\033[0m\n'
+setup
+HOOKS="$TEST_CONFIG_DIR/.claude-provider/hooks"
+"$CCS" notify on ghostty >/dev/null 2>&1
+out=$(printf '{}' | "$HOOKS/notify-stop.sh")
+assert_contains "stop hook emits terminalSequence" "terminalSequence" "$out"
+assert_contains "stop hook emits OSC 777" "777;notify" "$out"
+out=$(printf '{"notification_type":"permission_prompt"}' | "$HOOKS/notify-attention.sh")
+assert_contains "attention hook notifies on permission_prompt" "terminalSequence" "$out"
+out=$(printf '{"notification_type":"agent_completed"}' | "$HOOKS/notify-attention.sh")
+assert_eq "attention hook ignores agent_completed (subagents)" "" "$out"
+assert_exit "notify test works when installed" "0" "$CCS" notify test
+teardown
+
+# -- Notify: refuses invalid settings.json --
+printf '\033[1m[notify invalid settings]\033[0m\n'
+setup
+mkdir -p "$TEST_CONFIG_DIR/.claude"
+printf 'not json' > "$TEST_CONFIG_DIR/.claude/settings.json"
+assert_exit "notify on refuses broken settings.json" "1" "$CCS" notify on
+teardown
+
+# -- Notify: purge detaches hooks --
+printf '\033[1m[purge detaches notify]\033[0m\n'
+setup
+SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
+"$CCS" notify on >/dev/null 2>&1
+"$CCS" purge >/dev/null 2>&1
+assert_not_contains "purge removes hook references" "claude-provider" "$(cat "$SETTINGS")"
+assert_exit "settings still valid JSON after purge" "0" jq empty "$SETTINGS"
+teardown
+
 # -- Summary --
 TOTAL=$((PASS + FAIL))
 printf '\n\033[1m=== Results: %d/%d passed ===\033[0m\n' "$PASS" "$TOTAL"
