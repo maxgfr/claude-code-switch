@@ -229,6 +229,13 @@ base_url=https://ark.cn-beijing.volces.com/api/coding
 api_key=
 model=doubao-seed-code-preview-latest
 
+[wanapi]
+base_url=https://api.wanapis.com
+api_key=
+model=claude-sonnet-4-6
+opus_model=claude-opus-4-8
+haiku_model=claude-haiku-4-5-20251001
+
 [custom]
 base_url=
 api_key=

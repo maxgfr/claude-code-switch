@@ -109,6 +109,7 @@ All providers expose an Anthropic-compatible Messages API endpoint, confirmed wo
 | `qwen`       | `https://dashscope-intl.aliyuncs.com/apps/anthropic`      | `qwen3.5-plus`                   |
 | `minimax`    | `https://api.minimax.io/anthropic`                        | `MiniMax-M2.7`                   |
 | `doubao`     | `https://ark.cn-beijing.volces.com/api/coding`            | `doubao-seed-code-preview-latest`|
+| `wanapi`     | `https://api.wanapis.com`                                 | `claude-sonnet-4-6`              |
 | `custom`     | *(user-defined)*                                          | *(user-defined)*                 |
 
 ### Z.AI Coding Plan
