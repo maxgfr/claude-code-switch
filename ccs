@@ -234,13 +234,6 @@ model=doubao-seed-code-preview-latest
 # Volcengine is not in the llm-models catalogue, so pin the window by hand
 context_tokens=262144
 
-[wanapi]
-base_url=https://api.wanapis.com
-api_key=
-model=claude-sonnet-4-6
-opus_model=claude-opus-4-8
-haiku_model=claude-haiku-4-5-20251001
-
 [custom]
 base_url=
 api_key=
