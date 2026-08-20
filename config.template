@@ -7,14 +7,22 @@
 #   model=model-name          (main model — maps to sonnet/default tier)
 #   opus_model=model-name     (optional, for /models opus tier)
 #   haiku_model=model-name    (optional, for /models haiku tier + fast tasks)
+#   context_tokens=200000     (optional, pins the context window — plain integer)
+#   max_output_tokens=64000   (optional, pins the output limit — plain integer)
 #
 # Special: [anthropic] does not need base_url (uses native API)
 # Special: [_defaults] section sets global defaults
 # opus_model and haiku_model fall back to model if empty
+#
+# context_tokens / max_output_tokens are looked up automatically from
+# llm-models when it is installed, so leave them empty unless a lookup gets it
+# wrong (check with `ccs models`). Plain integers only — "200k" is not valid.
+# Set auto_context=false in [_defaults] to disable the lookup entirely.
 
 [_defaults]
 provider=anthropic
 model=claude-sonnet-5
+auto_context=true
 
 [anthropic]
 base_url=
@@ -60,6 +68,8 @@ haiku_model=MiniMax-M2.5
 base_url=https://ark.cn-beijing.volces.com/api/coding
 api_key=
 model=doubao-seed-code-preview-latest
+# Volcengine is not in the llm-models catalogue, so pin the window by hand
+context_tokens=262144
 
 [custom]
 base_url=

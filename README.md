@@ -10,6 +10,7 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 
 - **9 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, Custom
 - **Default model**: configurable globally and per provider
+- **Right-sized context window**: auto-detects each model's real window so auto-compact stops assuming 200k
 - **Zero dependencies**: pure POSIX sh — no jq, no python, no node
 - **Zero interference**: `claude` always works normally — `ccs` never touches your shell or Claude config
 - **Direct launch**: `ccs` starts Claude Code with the right env vars (scoped to that process)
@@ -62,6 +63,7 @@ COMMANDS
     config                      Open config file in $EDITOR
     launch [args...]            Launch claude with active provider env vars
     env                         Print export statements for current shell
+    models [refresh|clear]      Show / refresh the context windows ccs will use
     notify on|off|status|test   Desktop notifications when Claude needs you
     reset                       Clear active provider (back to vanilla claude)
     purge                       Remove all ccs data (~/.claude-provider/)
@@ -170,6 +172,63 @@ haiku_model=glm-4.7
 - **`model=`** — main model (maps to sonnet/default tier in `/models`)
 - **`opus_model=`** — optional, for `/models` opus tier (falls back to `model`)
 - **`haiku_model=`** — optional, for `/models` haiku tier + fast tasks (falls back to `model`)
+- **`context_tokens=`** — optional, pins the context window (plain integer; empty means auto)
+- **`max_output_tokens=`** — optional, pins the output limit (plain integer; empty means auto)
+- **`auto_context=`** — in `[_defaults]`, set to `false` to disable the automatic lookup
+
+## Context window
+
+Claude Code assumes a **200k** context window for any model it doesn't ship in its own table, so on
+a 1M model auto-compact fires four times too early — and it says so on every launch:
+
+```
+"glm-5.3" is not a model this version of Claude Code recognizes, so auto-compact
+will keep this session within 200k tokens (the context window it assumes)...
+```
+
+`ccs` looks the model up and sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to its real window, which both
+sizes auto-compact correctly and removes the warning:
+
+```
+>>> Launching claude with zai / glm-5.3 (1.0M context)
+```
+
+Inspect what it will use, per tier:
+
+```sh
+ccs models           # context + output limit + where each number came from
+ccs models refresh   # re-resolve, ignoring the cache
+ccs models clear     # drop the cache
+```
+
+```
+  Tier     Model         Context   Output    Source         Resolved as
+  main     glm-5.3       1.0M      131K      llm-models     zai-coding-plan/glm-5.3
+  haiku    glm-4.7       204K      131K      cache          zai/glm-4.7
+```
+
+**Requires [llm-models](https://github.com/maxgfr/llm-models)** (`brew install maxgfr/tap/llm-models`)
+— a soft dependency, exactly like `jq` for `notify`. Without it `ccs` behaves as it always did.
+Answers are cached in `~/.claude-provider/models-cache` for 7 days, so the launch path stays free of
+subprocesses, and a stale entry is still used when the lookup fails (offline, say).
+
+Because the same model id is published by many providers with different limits, the lookup is scoped
+by the provider's `base_url` — `api.z.ai` resolves to Z.AI's own numbers, not a reseller's.
+
+Override or opt out from the config:
+
+```ini
+[zai]
+context_tokens=200000       # pin the window (plain integer — "200k" is not valid)
+max_output_tokens=131072    # pin the output limit
+
+[_defaults]
+auto_context=false          # disable the lookup entirely
+```
+
+Two limits worth knowing: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is a single global value, so it is sized
+from the **main** model even when the opus/haiku tiers differ; and Claude Code ignores it for model
+ids starting with `claude-`, which is why `ccs` only sets it for third-party providers.
 
 ## Desktop notifications
 
@@ -240,6 +299,8 @@ If **no provider is configured at all** (no active provider, no API key in the d
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Third-party — maps to `haiku_model` in config      |
 | `CLAUDE_CODE_SUBAGENT_MODEL`    | Third-party — uses `model`                         |
 | `ANTHROPIC_SMALL_FAST_MODEL`    | Third-party — uses `haiku_model`                   |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS`| Third-party — the model's real context window      |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | Third-party — the model's real output limit        |
 
 State is persisted in `~/.claude-provider/active` so `ccs` works across shell sessions. Run `ccs reset` to clear it, or `ccs purge` to remove all ccs data.
 

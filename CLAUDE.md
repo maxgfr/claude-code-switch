@@ -17,7 +17,9 @@
 - **Single script**: `ccs` (~600 lines of POSIX sh)
 - **Config**: INI format at `~/.claude-provider/config`, parsed with shell builtins (`while read` + `case`)
 - **State**: `~/.claude-provider/active` stores current provider/model (removed by `ccs reset`)
-- **No external dependencies**: no jq, no python, no node
+- **Model cache**: `~/.claude-provider/models-cache` stores resolved context windows (survives
+  `reset`, removed by `purge`)
+- **No external dependencies**: no jq, no python, no node (jq and llm-models are soft, opt-in)
 - **Zero footprint**: `ccs reset` or `ccs purge` removes all traces
 
 ## Key design decisions
@@ -27,6 +29,10 @@
 - `env -u` used in `cmd_launch` to scrub conflicting inherited vars (same spirit as `local`: not strictly POSIX, supported by GNU/BSD/macOS/busybox). Native launch unsets third-party vars and vice versa; `cmd_env` native branch unsets the tier vars a third-party eval may have exported
 - `ccs -h|--help|-v|--version` are intercepted in `main()` BEFORE the generic `-*` claude passthrough — everything else starting with `-` goes to claude
 - Unconfigured launch (no active provider + no default api_key) falls back to vanilla `claude` with a warning instead of dying (`launch_vanilla()`)
+- `load_state()` is the single place that resolves active state or `[_defaults]`; `cmd_launch`,
+  `cmd_env` and `cmd_models` all go through it (return 1 = no default provider, 2 = no api key)
+- The two token-limit vars are appended to `exec env` as unquoted words that expand to nothing when
+  unknown — safe only because `is_uint` guarantees they are digits-only (`# shellcheck disable=SC2086`)
 - Config values stored in `cfg_<section>_<key>` shell variables, retrieved via `get_cfg()`
 - All providers must expose an **Anthropic Messages API** compatible endpoint
 - `anthropic` provider is special: uses `ANTHROPIC_API_KEY`, no `ANTHROPIC_BASE_URL`
@@ -40,7 +46,7 @@
 ```
 ccs                 # Main script — all logic here
 config.template     # Default config with all providers
-test.sh             # Integration test suite (run in CI)
+test.sh             # Integration test suite (run in CI, hermetic: stubs llm-models)
 .releaserc          # semantic-release config
 .version-hook.sh    # Injects version into ccs during release
 .github/workflows/  # release.yml (semantic-release on push to main)
@@ -49,7 +55,7 @@ test.sh             # Integration test suite (run in CI)
 
 ## Commands
 
-`ccs use|list|status|config|launch|env|notify|reset|purge|help|version`
+`ccs use|list|status|config|launch|env|models|notify|reset|purge|help|version`
 
 ## Notifications (`ccs notify`)
 
@@ -58,6 +64,27 @@ test.sh             # Integration test suite (run in CI)
 - Terminal methods: ghostty/wezterm → OSC 777, iterm2 → OSC 9, kitty → OSC 99, macos → osascript, bell → BEL only. All also emit a standalone BEL (dock badge/bounce). `auto` (default) detects at hook runtime via `TERM_PROGRAM`/`KITTY_WINDOW_ID`
 - Idempotent merge: entries whose command contains `/.claude-provider/hooks/` are replaced, never duplicated; user's other settings are preserved
 - `notify off` restores the previous `preferredNotifChannel` (saved in `~/.claude-provider/notify-state` on first install)
+
+## Context window (`ccs models`)
+
+- Claude Code assumes a 200k window for any model it doesn't ship in its own table. `ccs` sets
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (and `CLAUDE_CODE_MAX_OUTPUT_TOKENS`) to the model's real limits,
+  which both sizes auto-compact and silences the "not a model this version recognizes" warning
+- Claude Code only honours `CLAUDE_CODE_MAX_CONTEXT_TOKENS` for model ids that do **not** start with
+  `claude-`, so `ccs` sets it in the third-party branch only and `-u`-scrubs it in the native one.
+  It is a single global value — sized from the main model, not per tier
+- Values are plain integers. `200k` parses as `200`, so `is_uint` rejects anything non-numeric
+- Metadata comes from `llm-models` (github.com/maxgfr/llm-models), a **soft dependency** in the same
+  spirit as jq for `notify`. Absent → `ccs` behaves exactly as before. `llm_lookup` prefers
+  `llm-models resolve --endpoint <base_url> --field …` (>= 1.3, endpoint-scoped so a reseller entry
+  can't win) and falls back to `info --json` + awk for older versions
+- Answers are cached in `~/.claude-provider/models-cache` (`provider model ctx out epoch id`, one
+  line each, 7-day TTL, `-` for unknown fields). A stale entry is still used when a lookup fails.
+  `ccs purge` removes it with the rest of the dir; `ccs reset` deliberately does not
+- Resolution order in `load_limits`: `auto_context=false` → `context_tokens=`/`max_output_tokens=`
+  in the provider section → fresh cache → llm-models → stale cache → unknown (env var not set)
+- `test.sh` shadows `llm-models` with a stub on `PATH` for the whole suite (`FAKE_LLM_MODELS` holds
+  the answer, unset means no match) so CI never touches the network
 
 ## Adding a new provider
 

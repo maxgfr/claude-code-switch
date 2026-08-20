@@ -10,6 +10,8 @@ CONFIG_FILE="${CONFIG_DIR}/config"
 ACTIVE_FILE="${CONFIG_DIR}/active"
 HOOKS_DIR="${CONFIG_DIR}/hooks"
 NOTIFY_STATE_FILE="${CONFIG_DIR}/notify-state"
+MODELS_CACHE="${CONFIG_DIR}/models-cache"
+MODELS_CACHE_TTL=604800   # 7 days — context windows change on model releases
 SETTINGS_BACKUP="${CONFIG_DIR}/settings-backup.json"
 CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -183,6 +185,7 @@ require_config() {
 [_defaults]
 provider=anthropic
 model=claude-sonnet-5
+auto_context=true
 
 [anthropic]
 base_url=
@@ -228,6 +231,8 @@ haiku_model=MiniMax-M2.5
 base_url=https://ark.cn-beijing.volces.com/api/coding
 api_key=
 model=doubao-seed-code-preview-latest
+# Volcengine is not in the llm-models catalogue, so pin the window by hand
+context_tokens=262144
 
 [custom]
 base_url=
@@ -279,6 +284,231 @@ resolve_model() {
     die "No model configured for '$provider'. Specify one: ccs use $provider <model>"
 }
 
+# --- Model limits ---
+# Claude Code assumes a 200k context window for any model it does not ship in
+# its own table, so auto-compact fires far too early on a 1M model (and too
+# late on a smaller one). CLAUDE_CODE_MAX_CONTEXT_TOKENS overrides that: it is
+# honoured for every model id that does not start with "claude-" — exactly the
+# third-party case — and it also silences the "is not a model this version of
+# Claude Code recognizes" warning.
+#
+# Model metadata comes from llm-models (github.com/maxgfr/llm-models), a soft
+# dependency in the same spirit as jq for `notify`: present means windows are
+# sized automatically, absent means ccs behaves exactly as it did before.
+# Answers are cached in $MODELS_CACHE so the launch path stays subprocess-free.
+
+is_uint() {
+    case "${1:-}" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+have_llm_models() {
+    command -v llm-models >/dev/null 2>&1
+}
+
+# Render a token count for humans: 1000000 -> 1.0M, 204800 -> 204K
+fmt_tokens() {
+    local n="${1:-}"
+    if ! is_uint "$n"; then
+        printf '%s' "-"
+    elif [ "$n" -ge 1000000 ]; then
+        printf '%s.%sM' "$((n / 1000000))" "$(((n % 1000000) / 100000))"
+    elif [ "$n" -ge 1000 ]; then
+        printf '%sK' "$((n / 1000))"
+    else
+        printf '%s' "$n"
+    fi
+}
+
+# cache_lookup <provider> <model> -> "ctx out id age_seconds"
+cache_lookup() {
+    local now
+    [ -f "$MODELS_CACHE" ] || return 1
+    now=$(date +%s 2>/dev/null) || return 1
+    awk -v p="$1" -v m="$2" -v now="$now" '
+        $1 == p && $2 == m { print $3, $4, $6, now - $5; found = 1; exit }
+        END { exit !found }
+    ' "$MODELS_CACHE"
+}
+
+# cache_store <provider> <model> <ctx> <out> <id> — "-" marks an unknown field
+cache_store() {
+    local provider="$1" model="$2" ctx="$3" out="$4" id="$5"
+    local now tmp
+    now=$(date +%s 2>/dev/null) || return 0
+    tmp=$(mktemp) || return 0
+    if [ -f "$MODELS_CACHE" ]; then
+        awk -v p="$provider" -v m="$model" '!($1 == p && $2 == m)' "$MODELS_CACHE" > "$tmp"
+    fi
+    printf '%s %s %s %s %s %s\n' \
+        "$provider" "$model" "${ctx:--}" "${out:--}" "$now" "${id:--}" >> "$tmp"
+    mv "$tmp" "$MODELS_CACHE"
+    chmod 600 "$MODELS_CACHE"
+}
+
+# Pull "ctx out id" out of one `llm-models info --json` payload
+llm_parse_json() {
+    local json="$1" ctx out id
+    ctx=$(printf '%s\n' "$json" | awk -F: '/"context_length"/ { gsub(/[^0-9]/, "", $2); print $2; exit }')
+    out=$(printf '%s\n' "$json" | awk -F: '/"output_limit"/ { gsub(/[^0-9]/, "", $2); print $2; exit }')
+    id=$(printf '%s\n' "$json" | awk -F'"' '/"id"/ { print $4; exit }')
+    is_uint "$ctx" || return 1
+    printf '%s %s %s' "$ctx" "${out:--}" "${id:--}"
+}
+
+# llm_lookup <model> <base_url> -> "ctx out id"
+# `resolve --endpoint` (llm-models >= 1.3) answers for the endpoint ccs
+# actually calls, which matters: the same model id is published under dozens of
+# providers with different limits. Older llm-models fall back to info/find.
+llm_lookup() {
+    local model="$1" base_url="${2:-}" line json id
+
+    if [ -n "$base_url" ]; then
+        line=$(llm-models resolve "$model" --endpoint "$base_url" \
+            --field context_length,output_limit,id --quiet 2>/dev/null) || line=""
+        if [ -n "$line" ]; then
+            printf '%s' "$line" | tr '\t' ' '
+            return 0
+        fi
+    fi
+
+    line=$(llm-models resolve "$model" \
+        --field context_length,output_limit,id --quiet 2>/dev/null) || line=""
+    if [ -n "$line" ]; then
+        printf '%s' "$line" | tr '\t' ' '
+        return 0
+    fi
+
+    # llm-models < 1.3: exact id first, then the best trailing-segment match
+    json=$(llm-models info "$model" --json --quiet 2>/dev/null) || json=""
+    if [ -z "$json" ]; then
+        id=$(llm-models find --search "$model" --ids-only --quiet 2>/dev/null | awk -v m="$model" '
+            { base = $0; sub(/^.*\//, "", base)
+              if (tolower(base) == tolower(m)) { print; exit } }') || id=""
+        [ -n "$id" ] || return 1
+        json=$(llm-models info "$id" --json --quiet 2>/dev/null) || return 1
+    fi
+    llm_parse_json "$json"
+}
+
+# load_limits <provider> <model> [base_url] [refresh]
+# Sets CTX_TOKENS, OUT_TOKENS, CTX_SOURCE, CTX_MODEL_ID. Never fails: an
+# unknown window simply leaves CTX_TOKENS empty and ccs launches as before.
+load_limits() {
+    local provider="$1" model="$2" base_url="${3:-}" refresh="${4:-}"
+    local cfg_ctx cfg_out ctx="" out="" id="" src="unknown" age="" row fresh
+
+    CTX_TOKENS="" OUT_TOKENS="" CTX_SOURCE="unknown" CTX_MODEL_ID=""
+    [ -n "$model" ] || return 0
+
+    # The launch path reads $ACTIVE_FILE and never parses the config, so parse
+    # it here or the per-provider overrides below would be invisible.
+    if [ -z "${PROVIDERS+x}" ]; then
+        parse_config || true
+    fi
+
+    if [ "$(get_cfg "_defaults" "auto_context")" = "false" ]; then
+        CTX_SOURCE="off"
+        return 0
+    fi
+
+    cfg_ctx=$(get_cfg "$provider" "context_tokens")
+    cfg_out=$(get_cfg "$provider" "max_output_tokens")
+    if [ -n "$cfg_ctx" ] && ! is_uint "$cfg_ctx"; then
+        warn "ignoring non-numeric context_tokens for '$provider': $cfg_ctx"
+        cfg_ctx=""
+    fi
+    if [ -n "$cfg_out" ] && ! is_uint "$cfg_out"; then
+        warn "ignoring non-numeric max_output_tokens for '$provider': $cfg_out"
+        cfg_out=""
+    fi
+
+    if [ -z "$cfg_ctx" ] || [ -z "$cfg_out" ]; then
+        if [ -z "$refresh" ] && row=$(cache_lookup "$provider" "$model"); then
+            read -r ctx out id age <<EOF
+$row
+EOF
+            [ "$ctx" = "-" ] && ctx=""
+            [ "$out" = "-" ] && out=""
+            [ "$id" = "-" ] && id=""
+            if is_uint "$age" && [ "$age" -lt "$MODELS_CACHE_TTL" ]; then
+                src="cache"
+            else
+                src="cache (stale)"
+            fi
+        fi
+
+        # A fresh cache entry is authoritative; anything else asks llm-models.
+        if [ "$src" != "cache" ]; then
+            if have_llm_models; then
+                if fresh=$(llm_lookup "$model" "$base_url"); then
+                    read -r ctx out id <<EOF
+$fresh
+EOF
+                    [ "$out" = "-" ] && out=""
+                    [ "$id" = "-" ] && id=""
+                    src="llm-models"
+                    cache_store "$provider" "$model" "$ctx" "$out" "$id"
+                fi
+            elif [ "$src" = "unknown" ]; then
+                src="no llm-models"
+            fi
+        fi
+    fi
+
+    [ -n "$cfg_ctx" ] && { ctx="$cfg_ctx"; src="config"; }
+    [ -n "$cfg_out" ] && out="$cfg_out"
+
+    is_uint "$ctx" || ctx=""
+    is_uint "$out" || out=""
+    # An output limit above the context window is never meaningful.
+    if [ -n "$ctx" ] && [ -n "$out" ] && [ "$out" -gt "$ctx" ]; then
+        out="$ctx"
+    fi
+    [ -n "$ctx" ] || { [ "$src" = "no llm-models" ] || src="unknown"; }
+
+    CTX_TOKENS="$ctx"
+    OUT_TOKENS="$out"
+    CTX_SOURCE="$src"
+    CTX_MODEL_ID="$id"
+}
+
+# Populate ACTIVE_* from the active state file, falling back to [_defaults].
+# Returns 1 when no default provider is configured, 2 when it has no API key —
+# callers decide whether that means vanilla claude or a hard error.
+load_state() {
+    if read_active 2>/dev/null && [ -n "$ACTIVE_PROVIDER" ]; then
+        return 0
+    fi
+
+    parse_config
+    local dp dm base_url api_key opus haiku
+    dp=$(get_cfg "_defaults" "provider")
+    dm=$(get_cfg "_defaults" "model")
+    [ -n "$dp" ] || return 1
+    validate_provider "$dp"
+    api_key=$(get_cfg "$dp" "api_key")
+    [ -n "$api_key" ] || return 2
+
+    base_url=$(get_cfg "$dp" "base_url")
+    opus=$(get_cfg "$dp" "opus_model")
+    haiku=$(get_cfg "$dp" "haiku_model")
+    if [ -z "$dm" ]; then dm=$(get_cfg "$dp" "model"); fi
+    if [ -z "$dm" ]; then dm=$(get_cfg "$dp" "sonnet_model"); fi
+    if [ -z "$dm" ]; then dm=$(get_cfg "$dp" "default_model"); fi
+
+    ACTIVE_PROVIDER="$dp"
+    ACTIVE_MODEL="$dm"
+    ACTIVE_BASE_URL="$base_url"
+    ACTIVE_API_KEY="$api_key"
+    ACTIVE_OPUS="${opus:-$dm}"
+    ACTIVE_SONNET="$dm"
+    ACTIVE_HAIKU="${haiku:-$dm}"
+    return 0
+}
+
 # --- Commands ---
 
 cmd_use() {
@@ -303,7 +533,14 @@ cmd_use() {
         "${opus:-$model}" "$model" "${haiku:-$model}"
     write_defaults "$provider" "$model"
 
-    info "Switched to ${C_BOLD}${provider}${C_RESET} / ${C_CYAN}${model}${C_RESET}"
+    # Warm the window cache now so the launch path stays subprocess-free
+    load_limits "$provider" "$model" "$base_url"
+
+    if [ -n "$CTX_TOKENS" ]; then
+        info "Switched to ${C_BOLD}${provider}${C_RESET} / ${C_CYAN}${model}${C_RESET} ${C_DIM}($(fmt_tokens "$CTX_TOKENS") context)${C_RESET}"
+    else
+        info "Switched to ${C_BOLD}${provider}${C_RESET} / ${C_CYAN}${model}${C_RESET}"
+    fi
     printf '    Run %sccs%s to start claude with this provider\n' "${C_BOLD}" "${C_RESET}"
 }
 
@@ -357,6 +594,14 @@ cmd_status() {
         printf '  %sBase URL:%s  %s(native Anthropic API)%s\n' "${C_BOLD}" "${C_RESET}" "${C_DIM}" "${C_RESET}"
     fi
     printf '  %sAPI Key:%s   %s\n' "${C_BOLD}" "${C_RESET}" "$(mask_key "$ACTIVE_API_KEY")"
+    load_limits "$ACTIVE_PROVIDER" "$ACTIVE_MODEL" "$ACTIVE_BASE_URL"
+    if [ -n "$CTX_TOKENS" ]; then
+        printf '  %sContext:%s   %s tokens %s(%s)%s\n' "${C_BOLD}" "${C_RESET}" \
+            "$(fmt_tokens "$CTX_TOKENS")" "${C_DIM}" "$CTX_SOURCE" "${C_RESET}"
+    else
+        printf '  %sContext:%s   %sunknown (%s)%s\n' "${C_BOLD}" "${C_RESET}" \
+            "${C_DIM}" "$CTX_SOURCE" "${C_RESET}"
+    fi
     printf "\n"
 }
 
@@ -417,43 +662,9 @@ launch_vanilla() {
 }
 
 cmd_launch() {
-    # Try active state first, then fall back to defaults
-    if read_active 2>/dev/null && [ -n "$ACTIVE_PROVIDER" ]; then
-        : # use active state
-    else
-        # Fall back to config defaults
-        parse_config
-        local dp dm
-        dp=$(get_cfg "_defaults" "provider")
-        dm=$(get_cfg "_defaults" "model")
-        if [ -z "$dp" ]; then
-            launch_vanilla "$@"
-        fi
-        validate_provider "$dp"
-        if [ -z "$(get_cfg "$dp" "api_key")" ]; then
-            launch_vanilla "$@"
-        fi
-        local base_url api_key opus haiku
-        base_url=$(get_cfg "$dp" "base_url")
-        api_key=$(get_cfg "$dp" "api_key")
-        opus=$(get_cfg "$dp" "opus_model")
-        haiku=$(get_cfg "$dp" "haiku_model")
-        if [ -z "$dm" ]; then
-            dm=$(get_cfg "$dp" "model")
-        fi
-        if [ -z "$dm" ]; then
-            dm=$(get_cfg "$dp" "sonnet_model")
-        fi
-        if [ -z "$dm" ]; then
-            dm=$(get_cfg "$dp" "default_model")
-        fi
-        ACTIVE_PROVIDER="$dp"
-        ACTIVE_MODEL="$dm"
-        ACTIVE_BASE_URL="$base_url"
-        ACTIVE_API_KEY="$api_key"
-        ACTIVE_OPUS="${opus:-$dm}"
-        ACTIVE_SONNET="$dm"
-        ACTIVE_HAIKU="${haiku:-$dm}"
+    # Active state first, then [_defaults]; neither usable means vanilla claude
+    if ! load_state; then
+        launch_vanilla "$@"
     fi
 
     # Verify claude is available
@@ -461,16 +672,36 @@ cmd_launch() {
         die "claude command not found. Install Claude Code first."
     fi
 
-    info "Launching claude with ${C_BOLD}${ACTIVE_PROVIDER}${C_RESET} / ${C_CYAN}${ACTIVE_MODEL}${C_RESET}"
+    load_limits "$ACTIVE_PROVIDER" "$ACTIVE_MODEL" "$ACTIVE_BASE_URL"
+
+    if [ -n "$CTX_TOKENS" ]; then
+        info "Launching claude with ${C_BOLD}${ACTIVE_PROVIDER}${C_RESET} / ${C_CYAN}${ACTIVE_MODEL}${C_RESET} ${C_DIM}($(fmt_tokens "$CTX_TOKENS") context)${C_RESET}"
+    else
+        info "Launching claude with ${C_BOLD}${ACTIVE_PROVIDER}${C_RESET} / ${C_CYAN}${ACTIVE_MODEL}${C_RESET}"
+    fi
 
     # `env -u` scrubs conflicting vars inherited from the shell (e.g. a
     # previous `eval "$(ccs env)"` for another provider). Not strictly
     # POSIX but supported everywhere (GNU, BSD/macOS, busybox).
+    # The env list is fixed at parse time, so the two token limits are built as
+    # words that expand to nothing when unknown. Both are digits-only (is_uint
+    # in load_limits), so the unquoted expansion below cannot word-split.
+    local ctx_env="" out_env=""
+    if [ -n "$CTX_TOKENS" ]; then
+        ctx_env="CLAUDE_CODE_MAX_CONTEXT_TOKENS=$CTX_TOKENS"
+    fi
+    if [ -n "$OUT_TOKENS" ]; then
+        out_env="CLAUDE_CODE_MAX_OUTPUT_TOKENS=$OUT_TOKENS"
+    fi
+
     if [ -n "$ACTIVE_BASE_URL" ]; then
         # Third-party provider: use ANTHROPIC_AUTH_TOKEN to avoid
         # the "Detected a custom API key" interactive prompt
+        # shellcheck disable=SC2086  # intentional: empty means "do not set"
         exec env \
             -u ANTHROPIC_API_KEY \
+            -u CLAUDE_CODE_MAX_CONTEXT_TOKENS \
+            -u CLAUDE_CODE_MAX_OUTPUT_TOKENS \
             ANTHROPIC_BASE_URL="$ACTIVE_BASE_URL" \
             ANTHROPIC_AUTH_TOKEN="$ACTIVE_API_KEY" \
             ANTHROPIC_MODEL="$ACTIVE_MODEL" \
@@ -479,9 +710,12 @@ cmd_launch() {
             ANTHROPIC_DEFAULT_HAIKU_MODEL="$ACTIVE_HAIKU" \
             CLAUDE_CODE_SUBAGENT_MODEL="$ACTIVE_SONNET" \
             ANTHROPIC_SMALL_FAST_MODEL="$ACTIVE_HAIKU" \
+            $ctx_env $out_env \
             claude "$@"
     else
-        # Native Anthropic — use ANTHROPIC_API_KEY, no BASE_URL override
+        # Native Anthropic — use ANTHROPIC_API_KEY, no BASE_URL override.
+        # Claude Code ignores CLAUDE_CODE_MAX_CONTEXT_TOKENS for claude-* ids
+        # anyway, so the native setup is left entirely alone.
         exec env \
             -u ANTHROPIC_BASE_URL \
             -u ANTHROPIC_AUTH_TOKEN \
@@ -490,6 +724,8 @@ cmd_launch() {
             -u ANTHROPIC_DEFAULT_HAIKU_MODEL \
             -u CLAUDE_CODE_SUBAGENT_MODEL \
             -u ANTHROPIC_SMALL_FAST_MODEL \
+            -u CLAUDE_CODE_MAX_CONTEXT_TOKENS \
+            -u CLAUDE_CODE_MAX_OUTPUT_TOKENS \
             ANTHROPIC_API_KEY="$ACTIVE_API_KEY" \
             ANTHROPIC_MODEL="$ACTIVE_MODEL" \
             claude "$@"
@@ -497,38 +733,14 @@ cmd_launch() {
 }
 
 cmd_env() {
-    if ! read_active; then
-        # Try defaults
-        parse_config
-        local dp dm
-        dp=$(get_cfg "_defaults" "provider")
-        dm=$(get_cfg "_defaults" "model")
-        if [ -z "$dp" ]; then
-            die "No active provider and no default configured."
-        fi
-        validate_api_key "$dp"
-        local base_url api_key opus haiku
-        base_url=$(get_cfg "$dp" "base_url")
-        api_key=$(get_cfg "$dp" "api_key")
-        opus=$(get_cfg "$dp" "opus_model")
-        haiku=$(get_cfg "$dp" "haiku_model")
-        if [ -z "$dm" ]; then
-            dm=$(get_cfg "$dp" "model")
-        fi
-        if [ -z "$dm" ]; then
-            dm=$(get_cfg "$dp" "sonnet_model")
-        fi
-        if [ -z "$dm" ]; then
-            dm=$(get_cfg "$dp" "default_model")
-        fi
-        ACTIVE_PROVIDER="$dp"
-        ACTIVE_MODEL="$dm"
-        ACTIVE_BASE_URL="$base_url"
-        ACTIVE_API_KEY="$api_key"
-        ACTIVE_OPUS="${opus:-$dm}"
-        ACTIVE_SONNET="$dm"
-        ACTIVE_HAIKU="${haiku:-$dm}"
-    fi
+    local rc=0
+    load_state || rc=$?
+    case "$rc" in
+        1) die "No active provider and no default configured." ;;
+        2) validate_api_key "$(get_cfg "_defaults" "provider")" ;;
+    esac
+
+    load_limits "$ACTIVE_PROVIDER" "$ACTIVE_MODEL" "$ACTIVE_BASE_URL"
 
     if [ -n "$ACTIVE_BASE_URL" ]; then
         # Third-party: ANTHROPIC_AUTH_TOKEN (no prompt), unset API_KEY
@@ -540,6 +752,16 @@ cmd_env() {
         printf "export ANTHROPIC_DEFAULT_HAIKU_MODEL='%s'\n" "$ACTIVE_HAIKU"
         printf "export CLAUDE_CODE_SUBAGENT_MODEL='%s'\n" "$ACTIVE_SONNET"
         printf "export ANTHROPIC_SMALL_FAST_MODEL='%s'\n" "$ACTIVE_HAIKU"
+        if [ -n "$CTX_TOKENS" ]; then
+            printf "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='%s'\n" "$CTX_TOKENS"
+        else
+            printf 'unset CLAUDE_CODE_MAX_CONTEXT_TOKENS 2>/dev/null || true\n'
+        fi
+        if [ -n "$OUT_TOKENS" ]; then
+            printf "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='%s'\n" "$OUT_TOKENS"
+        else
+            printf 'unset CLAUDE_CODE_MAX_OUTPUT_TOKENS 2>/dev/null || true\n'
+        fi
     else
         # Native Anthropic: ANTHROPIC_API_KEY, unset AUTH_TOKEN.
         # Also unset the tier vars a previous third-party `eval $(ccs env)`
@@ -552,6 +774,8 @@ cmd_env() {
         printf 'unset ANTHROPIC_DEFAULT_HAIKU_MODEL 2>/dev/null || true\n'
         printf 'unset CLAUDE_CODE_SUBAGENT_MODEL 2>/dev/null || true\n'
         printf 'unset ANTHROPIC_SMALL_FAST_MODEL 2>/dev/null || true\n'
+        printf 'unset CLAUDE_CODE_MAX_CONTEXT_TOKENS 2>/dev/null || true\n'
+        printf 'unset CLAUDE_CODE_MAX_OUTPUT_TOKENS 2>/dev/null || true\n'
     fi
     printf "export ANTHROPIC_MODEL='%s'\n" "$ACTIVE_MODEL"
 }
@@ -574,6 +798,7 @@ ${C_BOLD}COMMANDS${C_RESET}
     config                      Open config file in \$EDITOR
     launch [args...]            Launch claude with active provider env vars
     env                         Print export statements for current shell
+    models [refresh|clear]      Show / refresh the context windows ccs will use
     notify on|off|status|test   Desktop notifications when Claude needs you
     reset                       Clear active provider (back to vanilla claude)
     purge                       Remove all ccs data (~/.claude-provider/)
@@ -586,8 +811,19 @@ ${C_BOLD}EXAMPLES${C_RESET}
     ccs use openrouter gpt-4o          Switch to OpenRouter with specific model
     ccs --print "hello"                Launch with extra claude flags
     eval "\$(ccs env)"                  Export vars to current shell
+    ccs models                         Show the context window per model tier
     ccs notify on                      Notify on task end + questions (needs jq)
     ccs notify on iterm2               Pin the terminal instead of auto-detect
+
+${C_BOLD}CONTEXT WINDOW${C_RESET}
+    ccs sizes CLAUDE_CODE_MAX_CONTEXT_TOKENS from the model's real window, so
+    auto-compact stops assuming 200k on a 1M model. Needs llm-models:
+
+        brew install maxgfr/tap/llm-models
+
+    Without it ccs works as before. Pin a window by hand with context_tokens=
+    in the provider's config section; auto_context=false in [_defaults] turns
+    the whole thing off.
 
 ${C_BOLD}CONFIG${C_RESET}
     ${CONFIG_FILE}
@@ -604,6 +840,58 @@ ${C_BOLD}SHELL INTEGRATION${C_RESET}
     }
 
 EOF
+}
+
+cmd_models() {
+    local action="${1:-show}" refresh="" rc=0
+
+    case "$action" in
+        clear)
+            rm -f "$MODELS_CACHE"
+            info "Model cache cleared"
+            return
+            ;;
+        refresh) refresh="1" ;;
+        show) ;;
+        *) die "Usage: ccs models [refresh|clear]" ;;
+    esac
+
+    load_state || rc=$?
+    case "$rc" in
+        1) die "No active provider and no default configured." ;;
+        2) validate_api_key "$(get_cfg "_defaults" "provider")" ;;
+    esac
+
+    if ! have_llm_models; then
+        warn "llm-models not found — windows fall back to whatever is pinned in the config"
+        printf '    Install it for automatic sizing: %sbrew install maxgfr/tap/llm-models%s\n\n' \
+            "${C_BOLD}" "${C_RESET}"
+    fi
+
+    printf '\n'
+    printf '  %s%-8s %-32s %-9s %-9s %-14s %s%s\n' "${C_BOLD}" \
+        "Tier" "Model" "Context" "Output" "Source" "Resolved as" "${C_RESET}"
+    printf '  %-8s %-32s %-9s %-9s %-14s %s\n' \
+        "--------" "--------------------------------" "---------" "---------" "--------------" "-------------------"
+
+    local tier model
+    for tier in main opus sonnet haiku; do
+        case "$tier" in
+            main)   model="$ACTIVE_MODEL" ;;
+            opus)   model="$ACTIVE_OPUS" ;;
+            sonnet) model="$ACTIVE_SONNET" ;;
+            haiku)  model="$ACTIVE_HAIKU" ;;
+        esac
+        load_limits "$ACTIVE_PROVIDER" "$model" "$ACTIVE_BASE_URL" "$refresh"
+        printf '  %-8s %-32s %-9s %-9s %-14s %s\n' \
+            "$tier" "$model" "$(fmt_tokens "$CTX_TOKENS")" "$(fmt_tokens "$OUT_TOKENS")" \
+            "$CTX_SOURCE" "${CTX_MODEL_ID:--}"
+    done
+    printf '\n'
+    printf '  %sOnly the main model sizes the session%s — CLAUDE_CODE_MAX_CONTEXT_TOKENS is global.\n' \
+        "${C_DIM}" "${C_RESET}"
+    printf '  %sA wrong pick? Set %scontext_tokens=%s in the [%s] section of the config.%s\n\n' \
+        "${C_DIM}" "${C_RESET}${C_BOLD}" "${C_RESET}${C_DIM}" "$ACTIVE_PROVIDER" "${C_RESET}"
 }
 
 cmd_reset() {
@@ -880,6 +1168,9 @@ main() {
             ;;
         env)
             cmd_env
+            ;;
+        models)
+            cmd_models "$@"
             ;;
         reset)
             cmd_reset
