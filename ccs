@@ -817,13 +817,15 @@ ${C_BOLD}EXAMPLES${C_RESET}
 
 ${C_BOLD}CONTEXT WINDOW${C_RESET}
     ccs sizes CLAUDE_CODE_MAX_CONTEXT_TOKENS from the model's real window, so
-    auto-compact stops assuming 200k on a 1M model. Needs llm-models:
+    auto-compact stops assuming 200k on a 1M model. Run 'ccs models' to see
+    what each tier resolved to.
 
+    Homebrew installs llm-models for you; after a manual install, add it with
         brew install maxgfr/tap/llm-models
+    ccs still runs without it, just without a window.
 
-    Without it ccs works as before. Pin a window by hand with context_tokens=
-    in the provider's config section; auto_context=false in [_defaults] turns
-    the whole thing off.
+    Pin a window by hand with context_tokens= in the provider's config
+    section; auto_context=false in [_defaults] turns the whole thing off.
 
 ${C_BOLD}CONFIG${C_RESET}
     ${CONFIG_FILE}

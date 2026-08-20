@@ -11,7 +11,7 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 - **9 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, Custom
 - **Default model**: configurable globally and per provider
 - **Right-sized context window**: detects each model's real window so auto-compact stops assuming 200k
-- **Zero required dependencies**: pure POSIX sh — no python, no node; `jq` and `llm-models` are optional add-ons
+- **Tiny footprint**: pure POSIX sh — no python, no node; Homebrew pulls `jq` and `llm-models` for you
 - **Zero interference**: `claude` always works normally — `ccs` never touches your shell or Claude config
 - **Direct launch**: `ccs` starts Claude Code with the right env vars (scoped to that process)
 - **Shell integration** (optional): `eval "$(ccs env)"` exports vars to your current session
@@ -24,10 +24,10 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 
 ```sh
 brew install maxgfr/tap/claude-code-switch
-
-# Optional: automatic context-window sizing (see below)
-brew install maxgfr/tap/llm-models
 ```
+
+That also installs [`llm-models`](https://github.com/maxgfr/llm-models) (context-window sizing) and
+`jq` (notifications).
 
 ### Manual
 
@@ -39,6 +39,10 @@ chmod +x /usr/local/bin/ccs
 # First run creates ~/.claude-provider/config — add your API keys
 ccs config
 ```
+
+This path skips the dependencies Homebrew would have installed. `ccs` runs fine without them, but
+add [`llm-models`](https://github.com/maxgfr/llm-models) for context-window sizing and `jq` for
+`ccs notify` when you want those.
 
 ## Quick start
 
@@ -215,10 +219,17 @@ ccs models clear     # drop the cache
   haiku    glm-4.7       204K      131K      cache          zai/glm-4.7
 ```
 
-**Requires [llm-models](https://github.com/maxgfr/llm-models)** (`brew install maxgfr/tap/llm-models`)
-— a soft dependency, exactly like `jq` for `notify`. Without it `ccs` behaves as it always did.
-Answers are cached in `~/.claude-provider/models-cache` for 7 days, so the launch path stays free of
-subprocesses, and a stale entry is still used when the lookup fails (offline, say).
+The lookup uses [**llm-models**](https://github.com/maxgfr/llm-models), which Homebrew installs
+alongside `ccs`. If you installed `ccs` by hand instead, add it:
+
+```sh
+brew install maxgfr/tap/llm-models
+```
+
+`ccs` still runs without it — you just get no window, exactly as before — so a broken or missing
+install degrades rather than breaks. Answers are cached in `~/.claude-provider/models-cache` for 7
+days, so the launch path stays free of subprocesses, and a stale entry is still used when the lookup
+fails (offline, say).
 
 Because the same model id is published by many providers with different limits, the lookup is scoped
 by the provider's `base_url` — `api.z.ai` resolves to Z.AI's own numbers, not a reseller's.
