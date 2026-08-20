@@ -19,7 +19,9 @@
 - **State**: `~/.claude-provider/active` stores current provider/model (removed by `ccs reset`)
 - **Model cache**: `~/.claude-provider/models-cache` stores resolved context windows (survives
   `reset`, removed by `purge`)
-- **No external dependencies**: no jq, no python, no node (jq and llm-models are soft, opt-in)
+- **No language runtimes**: no python, no node. Two CLI dependencies, both declared in the
+  Homebrew formula: `jq` (notify) and `llm-models` (context windows). Both degrade gracefully
+  at runtime so a manual `curl` install still works
 - **Zero footprint**: `ccs reset` or `ccs purge` removes all traces
 
 ## Key design decisions
@@ -74,8 +76,9 @@ test.sh             # Integration test suite (run in CI, hermetic: stubs llm-mod
   `claude-`, so `ccs` sets it in the third-party branch only and `-u`-scrubs it in the native one.
   It is a single global value — sized from the main model, not per tier
 - Values are plain integers. `200k` parses as `200`, so `is_uint` rejects anything non-numeric
-- Metadata comes from `llm-models` (github.com/maxgfr/llm-models), a **soft dependency** in the same
-  spirit as jq for `notify`. Absent → `ccs` behaves exactly as before. `llm_lookup` prefers
+- Metadata comes from `llm-models` (github.com/maxgfr/llm-models), a `depends_on` in the Homebrew
+  formula. The script still degrades gracefully when it is absent (manual installs, broken PATH) →
+  no window set, `ccs` behaves exactly as before. Do not make it fatal. `llm_lookup` prefers
   `llm-models resolve --endpoint <base_url> --field …` (>= 1.3, endpoint-scoped so a reseller entry
   can't win) and falls back to `info --json` + awk for older versions
 - Answers are cached in `~/.claude-provider/models-cache` (`provider model ctx out epoch id`, one
