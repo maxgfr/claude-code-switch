@@ -2,7 +2,7 @@
 
 Minimal, zero-dependency provider switching for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). One shell script to rule them all.
 
-Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, or any custom endpoint) with a single command. **`claude` always works as-is** — `ccs` is a sidecar that only injects env vars when you explicitly run `ccs`.
+Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, or any custom endpoint) with a single command, and get each model's **real context window** instead of Claude Code's 200k guess. **`claude` always works as-is** — `ccs` is a sidecar that only injects env vars when you explicitly run `ccs`.
 
 Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-code-switch), stripped down to the essentials: **switch provider, set model, launch claude**.
 
@@ -10,8 +10,8 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 
 - **9 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, Custom
 - **Default model**: configurable globally and per provider
-- **Right-sized context window**: auto-detects each model's real window so auto-compact stops assuming 200k
-- **Zero dependencies**: pure POSIX sh — no jq, no python, no node
+- **Right-sized context window**: detects each model's real window so auto-compact stops assuming 200k
+- **Zero required dependencies**: pure POSIX sh — no python, no node; `jq` and `llm-models` are optional add-ons
 - **Zero interference**: `claude` always works normally — `ccs` never touches your shell or Claude config
 - **Direct launch**: `ccs` starts Claude Code with the right env vars (scoped to that process)
 - **Shell integration** (optional): `eval "$(ccs env)"` exports vars to your current session
@@ -24,6 +24,9 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 
 ```sh
 brew install maxgfr/tap/claude-code-switch
+
+# Optional: automatic context-window sizing (see below)
+brew install maxgfr/tap/llm-models
 ```
 
 ### Manual
@@ -48,6 +51,10 @@ ccs use openrouter
 
 # 3. Launch Claude Code
 ccs
+```
+
+```
+>>> Launching claude with zai / glm-5.3 (1.0M context)
 ```
 
 ## Usage
@@ -88,6 +95,7 @@ ccs use doubao                       # Doubao Seed Code (ByteDance)
 # Check state
 ccs list                              # See all providers and their status
 ccs status                            # See active provider, model, masked API key
+ccs models                            # See the context window ccs will use, per tier
 
 # Launch Claude Code
 ccs                                   # Launch with active provider
@@ -226,9 +234,21 @@ max_output_tokens=131072    # pin the output limit
 auto_context=false          # disable the lookup entirely
 ```
 
-Two limits worth knowing: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is a single global value, so it is sized
-from the **main** model even when the opus/haiku tiers differ; and Claude Code ignores it for model
-ids starting with `claude-`, which is why `ccs` only sets it for third-party providers.
+### Known limits
+
+- `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is a **single global value**, so it is sized from the *main*
+  model even when the opus/haiku tiers have different windows. `ccs models` shows all four.
+- Claude Code ignores it for model ids starting with `claude-`, which is why `ccs` sets it for
+  third-party providers only and scrubs it for native Anthropic.
+- It takes a **plain integer**. `200k` parses as `200`, so `ccs` rejects any non-numeric pin with a
+  warning rather than passing it through.
+- One line survives: Claude Code still emits the diagnostic
+  `[claude-code:unrecognized_model] {"model":"glm-5.3",...}`. That one is only silenced by mapping
+  the id in the `modelOverrides` setting — which would make Claude Code resolve your model to an
+  Anthropic one and *ignore the window you just set*. `ccs` deliberately does not do that, and does
+  not write to `~/.claude/settings.json` outside `ccs notify`.
+- A model missing from the catalogue (Doubao/Volcengine, for instance) simply gets no window, and
+  `ccs` behaves as it did before. Pin it with `context_tokens=`.
 
 ## Desktop notifications
 

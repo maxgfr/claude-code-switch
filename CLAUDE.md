@@ -85,6 +85,12 @@ test.sh             # Integration test suite (run in CI, hermetic: stubs llm-mod
   in the provider section → fresh cache → llm-models → stale cache → unknown (env var not set)
 - `test.sh` shadows `llm-models` with a stub on `PATH` for the whole suite (`FAKE_LLM_MODELS` holds
   the answer, unset means no match) so CI never touches the network
+- **Do not reach for `modelOverrides` to silence the leftover
+  `[claude-code:unrecognized_model]` diagnostic.** Its schema is `Record<string,string>` mapping an
+  Anthropic model id to a provider-specific one, so an entry makes Claude Code resolve the model to
+  a `claude-*` id — which makes it *ignore* `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and adopt that
+  Anthropic model's window instead. It also lives in `~/.claude/settings.json`, off-limits outside
+  `ccs notify`. Verified live: the context warning goes away, that one diagnostic line stays
 
 ## Adding a new provider
 

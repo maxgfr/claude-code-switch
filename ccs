@@ -553,8 +553,8 @@ cmd_list() {
     fi
 
     printf "\n"
-    printf '  %s%-2s %-14s %-16s %s%s\n' "${C_BOLD}" "" "Provider" "Status" "Model" "${C_RESET}"
-    printf '  %-2s %-14s %-16s %s\n' "" "--------------" "----------------" "-------------------------"
+    printf '  %s%-1s %-14s %-16s %s%s\n' "${C_BOLD}" "" "Provider" "Status" "Model" "${C_RESET}"
+    printf '  %-1s %-14s %-16s %s\n' "" "--------------" "----------------" "-------------------------"
 
     local p
     for p in $PROVIDERS; do
