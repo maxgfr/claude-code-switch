@@ -136,6 +136,7 @@ out=$("$CCS" list)
 assert_contains "list shows anthropic" "anthropic" "$out"
 assert_contains "list shows zai" "zai" "$out"
 assert_contains "list shows doubao" "doubao" "$out"
+assert_contains "list shows wanapi" "wanapi" "$out"
 assert_contains "list shows custom" "custom" "$out"
 teardown
 
