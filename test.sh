@@ -7,6 +7,23 @@ PASS=0
 FAIL=0
 TEST_CONFIG_DIR=""
 
+# ccs consults llm-models for context windows. Shadow it with a deterministic
+# stub for the whole suite so tests never touch the network: FAKE_LLM_MODELS
+# holds the "ctx out id" answer, and unset means "no match" (exit 1), which is
+# the behaviour every pre-existing test expects.
+STUB_DIR=$(mktemp -d)
+cat > "$STUB_DIR/llm-models" <<'STUB'
+#!/bin/sh
+[ "${1:-}" = "resolve" ] || exit 1
+[ -n "${FAKE_LLM_MODELS:-}" ] || exit 1
+printf '%s\n' "$FAKE_LLM_MODELS" | tr ' ' '\t'
+STUB
+chmod +x "$STUB_DIR/llm-models"
+export PATH="$STUB_DIR:$PATH"
+# A PATH with no llm-models on it, for the soft-dependency-absent tests
+BARE_PATH="/usr/bin:/bin"
+trap 'rm -rf "$STUB_DIR"' EXIT
+
 # --- Helpers ---
 
 setup() {
@@ -72,6 +89,24 @@ set_all_keys() {
     local cfg="$TEST_CONFIG_DIR/.claude-provider/config"
     local tmp="${cfg}.tmp"
     sed "s/^api_key=$/api_key=${keyval}/" "$cfg" > "$tmp"
+    mv "$tmp" "$cfg"
+}
+
+# Set (or add) key=value inside a config section
+set_key() {
+    local section="$1" key="$2" value="$3"
+    local cfg="$TEST_CONFIG_DIR/.claude-provider/config"
+    local tmp="${cfg}.tmp"
+    awk -v s="[$section]" -v k="$key" -v v="$value" '
+        $0 == s { in_s = 1; print; next }
+        /^\[/ {
+            if (in_s && !done) { print k "=" v; done = 1 }
+            in_s = 0; print; next
+        }
+        in_s && index($0, k "=") == 1 { print k "=" v; done = 1; next }
+        { print }
+        END { if (in_s && !done) print k "=" v }
+    ' "$cfg" > "$tmp"
     mv "$tmp" "$cfg"
 }
 
@@ -403,6 +438,141 @@ SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
 "$CCS" purge >/dev/null 2>&1
 assert_not_contains "purge removes hook references" "claude-provider" "$(cat "$SETTINGS")"
 assert_exit "settings still valid JSON after purge" "0" jq empty "$SETTINGS"
+teardown
+
+# -- Context window: pinned via config --
+printf '\033[1m[context window: config pin]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+set_key zai context_tokens 123456
+set_key zai max_output_tokens 4096
+"$CCS" use zai >/dev/null 2>&1
+out=$("$CCS" env)
+assert_contains "env exports pinned context" "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='123456'" "$out"
+assert_contains "env exports pinned output limit" "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='4096'" "$out"
+out=$("$CCS" status)
+assert_contains "status shows the window" "123K" "$out"
+assert_contains "status names the source" "config" "$out"
+teardown
+
+# -- Context window: launch injects the vars --
+printf '\033[1m[context window: launch]\033[0m\n'
+setup
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+set_all_keys "test-key-123"
+set_key zai context_tokens 123456
+"$CCS" use zai >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>/dev/null)
+assert_contains "third-party launch sets context tokens" "CLAUDE_CODE_MAX_CONTEXT_TOKENS=123456" "$out"
+# Native Anthropic must stay untouched, and stale values must not leak in
+"$CCS" use anthropic >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" CLAUDE_CODE_MAX_CONTEXT_TOKENS="999999" "$CCS" launch 2>/dev/null)
+assert_not_contains "native launch scrubs inherited context tokens" "999999" "$out"
+assert_not_contains "native launch sets no context tokens" "CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
+rm -rf "$SHIM_DIR"
+teardown
+
+# -- Context window: unknown model leaves ccs untouched --
+printf '\033[1m[context window: unknown model]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+"$CCS" use zai >/dev/null 2>&1
+out=$("$CCS" env)
+assert_contains "env unsets context tokens when unknown" "unset CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
+assert_not_contains "env exports no context tokens when unknown" "export CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
+out=$("$CCS" status)
+assert_contains "status reports unknown" "unknown" "$out"
+teardown
+
+# -- Context window: auto_context=false disables the lookup --
+printf '\033[1m[context window: auto_context=false]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+set_key _defaults auto_context false
+"$CCS" use zai >/dev/null 2>&1
+out=$(FAKE_LLM_MODELS="1000000 131072 zai-coding-plan/glm-5.3" "$CCS" env)
+assert_not_contains "auto_context=false exports nothing" "export CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
+out=$(FAKE_LLM_MODELS="1000000 131072 zai-coding-plan/glm-5.3" "$CCS" status)
+assert_contains "status reports off" "off" "$out"
+teardown
+
+# -- Context window: a non-numeric pin is rejected, not exported --
+printf '\033[1m[context window: invalid pin]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+set_key zai context_tokens "200k"
+"$CCS" use zai >/dev/null 2>&1
+out=$("$CCS" env 2>/dev/null)
+assert_not_contains "non-numeric pin is not exported" "export CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
+err=$("$CCS" env 2>&1 >/dev/null)
+assert_contains "non-numeric pin warns" "non-numeric context_tokens" "$err"
+teardown
+
+# -- Context window: resolved from llm-models, then cached --
+printf '\033[1m[context window: llm-models lookup + cache]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+FAKE_LLM_MODELS="1000000 131072 zai-coding-plan/glm-5.3" "$CCS" use zai >/dev/null 2>&1
+cache="$TEST_CONFIG_DIR/.claude-provider/models-cache"
+assert_eq "use writes the cache" "true" "$([ -f "$cache" ] && echo true || echo false)"
+assert_contains "cache records the window" "zai glm-5.1 1000000 131072" "$(cat "$cache")"
+assert_contains "cache records the resolved id" "zai-coding-plan/glm-5.3" "$(cat "$cache")"
+assert_eq "cache file is 600" "600" "$(stat -c '%a' "$cache" 2>/dev/null || stat -f '%A' "$cache" 2>/dev/null)"
+# The cache answers without llm-models being consulted again
+out=$("$CCS" env)
+assert_contains "cached window is exported" "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'" "$out"
+assert_contains "cached output limit is exported" "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='131072'" "$out"
+out=$("$CCS" status)
+assert_contains "status credits the cache" "cache" "$out"
+teardown
+
+# -- Context window: an output limit above the window is clamped --
+printf '\033[1m[context window: output clamped to window]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+FAKE_LLM_MODELS="200000 384000 deepseek/deepseek-chat" "$CCS" use deepseek >/dev/null 2>&1
+out=$("$CCS" env)
+assert_contains "output limit clamped to the window" "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='200000'" "$out"
+teardown
+
+# -- ccs models --
+printf '\033[1m[models command]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+FAKE_LLM_MODELS="1000000 131072 zai-coding-plan/glm-5.3" "$CCS" use zai >/dev/null 2>&1
+out=$("$CCS" models)
+assert_contains "models lists the main tier" "main" "$out"
+assert_contains "models shows the window" "1.0M" "$out"
+assert_contains "models shows the resolved id" "zai-coding-plan/glm-5.3" "$out"
+assert_contains "models lists the haiku tier" "haiku" "$out"
+assert_exit "models rejects an unknown action" "1" "$CCS" models bogus
+"$CCS" models clear >/dev/null 2>&1
+assert_eq "models clear removes the cache" "false" \
+    "$([ -f "$TEST_CONFIG_DIR/.claude-provider/models-cache" ] && echo true || echo false)"
+teardown
+
+# -- Soft dependency: ccs works with no llm-models on PATH --
+printf '\033[1m[llm-models absent]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+PATH="$BARE_PATH" "$CCS" use zai >/dev/null 2>&1
+out=$(PATH="$BARE_PATH" "$CCS" env)
+assert_contains "still exports the model" "ANTHROPIC_MODEL" "$out"
+assert_not_contains "exports no context tokens" "export CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
+out=$(PATH="$BARE_PATH" "$CCS" status)
+assert_contains "status explains the missing dependency" "no llm-models" "$out"
+teardown
+
+# -- purge removes the model cache --
+printf '\033[1m[purge removes model cache]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+FAKE_LLM_MODELS="1000000 131072 zai/glm-5.1" "$CCS" use zai >/dev/null 2>&1
+"$CCS" purge >/dev/null 2>&1
+assert_eq "purge removes the whole dir" "false" \
+    "$([ -d "$TEST_CONFIG_DIR/.claude-provider" ] && echo true || echo false)"
 teardown
 
 # -- Summary --
