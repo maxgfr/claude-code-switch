@@ -869,10 +869,10 @@ cmd_models() {
     fi
 
     printf '\n'
-    printf '  %s%-8s %-26s %-9s %-9s %-14s %s%s\n' "${C_BOLD}" \
+    printf '  %s%-8s %-32s %-9s %-9s %-14s %s%s\n' "${C_BOLD}" \
         "Tier" "Model" "Context" "Output" "Source" "Resolved as" "${C_RESET}"
-    printf '  %-8s %-26s %-9s %-9s %-14s %s\n' \
-        "--------" "--------------------------" "---------" "---------" "--------------" "-------------------"
+    printf '  %-8s %-32s %-9s %-9s %-14s %s\n' \
+        "--------" "--------------------------------" "---------" "---------" "--------------" "-------------------"
 
     local tier model
     for tier in main opus sonnet haiku; do
@@ -883,7 +883,7 @@ cmd_models() {
             haiku)  model="$ACTIVE_HAIKU" ;;
         esac
         load_limits "$ACTIVE_PROVIDER" "$model" "$ACTIVE_BASE_URL" "$refresh"
-        printf '  %-8s %-26s %-9s %-9s %-14s %s\n' \
+        printf '  %-8s %-32s %-9s %-9s %-14s %s\n' \
             "$tier" "$model" "$(fmt_tokens "$CTX_TOKENS")" "$(fmt_tokens "$OUT_TOKENS")" \
             "$CTX_SOURCE" "${CTX_MODEL_ID:--}"
     done
