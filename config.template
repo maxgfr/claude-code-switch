@@ -24,6 +24,23 @@ provider=anthropic
 model=claude-sonnet-5
 auto_context=true
 
+# Config backup / sync — see `ccs sync`. Normally written by `ccs sync init`.
+# Sections starting with _ are reserved: they are never treated as providers.
+# Values must not carry trailing comments (everything after = is the value).
+#   remote       git URL of the gist or repo holding your Claude Code config
+#   kind         repo | gist (a gist stores a flattened tree so GitHub shows it)
+#   include_ccs  true also backs up this file, with every api_key= blanked out
+#   auto_launch  true syncs on every `ccs` launch (never blocks the launch)
+#   auto_hooks   managed by `ccs sync hooks on|off` — do not set by hand
+#   prune        true mirrors the remote on pull, false only ever adds
+[_sync]
+remote=
+kind=repo
+include_ccs=false
+auto_launch=false
+auto_hooks=false
+prune=true
+
 [anthropic]
 base_url=
 api_key=

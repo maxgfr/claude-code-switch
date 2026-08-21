@@ -10,18 +10,27 @@
 
 **`claude` must always work on its own.** `ccs` never modifies the user's shell, dotfiles, or Claude Code config. All state lives in `~/.claude-provider/` and env vars only exist inside the `ccs` subprocess (`exec env ... claude`).
 
-**Single exception:** `ccs notify on|off` edits `~/.claude/settings.json` (hooks + `preferredNotifChannel`). Explicit opt-in, backed up to `~/.claude-provider/settings-backup.json`, fully reversed by `notify off`; `purge` detaches the hooks first. Requires jq (soft dependency — only the notify command).
+**Two exceptions, both opt-in:**
+
+1. `ccs notify on|off` edits `~/.claude/settings.json` (hooks + `preferredNotifChannel`). Backed up to `~/.claude-provider/settings-backup.json`, fully reversed by `notify off`. Requires jq.
+2. `ccs sync pull|import` writes into `~/.claude`, restricted to `$SYNC_PATHS`; `ccs sync hooks on` adds `SessionStart`/`SessionEnd` entries to `~/.claude/settings.json`. Every write is preceded by a snapshot into `~/.claude-provider/sync-backup/<timestamp>/`. Requires git.
+
+`purge` detaches both hook families before deleting anything.
 
 ## Architecture
 
-- **Single script**: `ccs` (~600 lines of POSIX sh)
+- **Single script**: `ccs` (~2250 lines of POSIX sh)
 - **Config**: INI format at `~/.claude-provider/config`, parsed with shell builtins (`while read` + `case`)
 - **State**: `~/.claude-provider/active` stores current provider/model (removed by `ccs reset`)
 - **Model cache**: `~/.claude-provider/models-cache` stores resolved context windows (survives
   `reset`, removed by `purge`)
-- **No language runtimes**: no python, no node. Two CLI dependencies, both declared in the
-  Homebrew formula: `jq` (notify) and `llm-models` (context windows). Both degrade gracefully
-  at runtime so a manual `curl` install still works
+- **Sync state**: `~/.claude-provider/sync/` (git working copy), `sync-backup/<timestamp>/`
+  (pre-restore snapshots), `sync-state` (last sync epoch + commit). All survive `reset`, all
+  removed by `purge`
+- **No language runtimes**: no python, no node. Four CLI dependencies, none fatal: `jq` (notify,
+  and settings.json handling in sync), `llm-models` (context windows), `git` (sync), `gh` (only
+  `sync init --gist-new` / `--repo-new`). All degrade gracefully at runtime so a manual `curl`
+  install still works
 - **Zero footprint**: `ccs reset` or `ccs purge` removes all traces
 
 ## Key design decisions
@@ -35,7 +44,16 @@
   `cmd_env` and `cmd_models` all go through it (return 1 = no default provider, 2 = no api key)
 - The two token-limit vars are appended to `exec env` as unquoted words that expand to nothing when
   unknown — safe only because `is_uint` guarantees they are digits-only (`# shellcheck disable=SC2086`)
-- Config values stored in `cfg_<section>_<key>` shell variables, retrieved via `get_cfg()`
+- Config values stored in `cfg_<section>_<key>` shell variables, retrieved via `get_cfg()`;
+  `config_set()` writes one back (awk, creates the section when missing)
+- **Sections starting with `_` are reserved** (`[_defaults]`, `[_sync]`): parsed into `cfg_*` like
+  any other but never added to `$PROVIDERS`, so they stay out of `ccs list` and `ccs use`. Adding a
+  new settings section means picking a `_` name, nothing else
+- All writes to `~/.claude/settings.json` go through `settings_prepare` / `settings_attach_hook` /
+  `settings_detach_hooks`. Detach is **scoped by event name**, which is what lets `notify` own
+  `Stop`/`Notification` and `sync` own `SessionStart`/`SessionEnd` without either clobbering the
+  other. Both also share `$HOOKS_DIR`, so neither may `rm -rf` it — only its own scripts, then
+  `rmdir` if empty
 - All providers must expose an **Anthropic Messages API** compatible endpoint
 - `anthropic` provider is special: uses `ANTHROPIC_API_KEY`, no `ANTHROPIC_BASE_URL`
 - Third-party providers use `ANTHROPIC_AUTH_TOKEN` (not `ANTHROPIC_API_KEY`) to avoid the "Detected a custom API key" interactive prompt
@@ -57,14 +75,45 @@ test.sh             # Integration test suite (run in CI, hermetic: stubs llm-mod
 
 ## Commands
 
-`ccs use|list|status|config|launch|env|models|notify|reset|purge|help|version`
+`ccs use|list|status|config|launch|env|models|notify|sync|reset|purge|help|version`
+
+## Config sync (`ccs sync`)
+
+- `SYNC_PATHS` at the top of `ccs` is the **allow-list** of what leaves `~/.claude`. It is an
+  allow-list on purpose: a real `~/.claude` is gigabytes of `projects/`, `jobs/` and
+  `file-history/`. Never invert it into a deny-list
+- One engine for both backends, because **a gist is a git repository**. `kind=gist` stores a
+  flattened tree (`/` → `%2F`, `%` → `%25`, encode `%` first / decode it last) because GitHub's
+  gist UI hides subdirectories; `kind=repo` stores the real tree. `.ccs-sync` records the kind so
+  `import` decodes without configuration
+- **The manifest carries no timestamp on purpose.** It has to be byte-identical when nothing
+  changed, or every push would produce a commit — once per launch under `sync auto on`
+- Three transforms make a restored config actually work, all applied to the *staging tree*, never
+  by walking `~/.claude`: `tar -ch` dereferences symlinks (`skills/` is routinely links into
+  another checkout), `sync_rewrite_home` swaps `$HOME` for `__CCS_HOME__` and back, and
+  `sync_strip_ccs_hooks` / `sync_reattach_ccs_hooks` keep machine-local hook paths out of the remote
+- `sync_scan_secrets` gates every push (`--force` overrides). In the auto path it returns 3 and the
+  launch continues
+- Mirror is the default (`prune=true`); `--additive` / `prune=false` only ever adds. `sync_apply`
+  is the **only** function that writes into `~/.claude`, and `sync_backup_claude` always runs first
+- `sync_stage` returns 1 (not `die`) when `~/.claude` has nothing to back up, so `sync status`
+  works on a fresh machine
+- `sync auto on` runs inside `sync_run_bounded` (background job + `kill -0` watchdog — macOS has no
+  `timeout(1)`) and **must never be fatal**: `cmd_launch` calls it before anything provider-related
+  and ignores every failure
+- `include_ccs=true` publishes `~/.claude-provider/config` with every `api_key=` blanked and the
+  `[_sync]` section stripped. On the way back, `sync_merge_ccs_config` writes an `api_key` only when
+  the local one is empty — a pull must never cost a key
+- `test.sh` runs the whole sync suite against a `git init --bare` repo over `file://`: no network,
+  no `gh`. ccs writes its own git identity into the working copy (`sync_git_identity`), which is
+  what makes it pass on a CI runner with no global git config
 
 ## Notifications (`ccs notify`)
 
 - `notify on [terminal]` generates three POSIX sh hook scripts (heredocs embedded in `ccs`) into `~/.claude-provider/hooks/`: `notify-emit.sh` (terminal detection + OSC emission), `notify-stop.sh` (Stop hook), `notify-attention.sh` (Notification hook, filters `notification_type`), then jq-merges references into `~/.claude/settings.json`
 - `SubagentStop` is deliberately NOT hooked and `agent_completed` notifications are ignored — subagents/background tasks must stay silent
 - Terminal methods: ghostty/wezterm → OSC 777, iterm2 → OSC 9, kitty → OSC 99, macos → osascript, bell → BEL only. All also emit a standalone BEL (dock badge/bounce). `auto` (default) detects at hook runtime via `TERM_PROGRAM`/`KITTY_WINDOW_ID`
-- Idempotent merge: entries whose command contains `/.claude-provider/hooks/` are replaced, never duplicated; user's other settings are preserved
+- Idempotent merge: entries whose command contains `/.claude-provider/hooks/` (`$CCS_HOOK_MARKER`) are replaced, never duplicated; user's other settings are preserved. The merge goes through the shared `settings_*` helpers and touches **only** `Stop` and `Notification`
 - `notify off` restores the previous `preferredNotifChannel` (saved in `~/.claude-provider/notify-state` on first install)
 
 ## Context window (`ccs models`)

@@ -11,6 +11,7 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 - **9 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, Custom
 - **Default model**: configurable globally and per provider
 - **Right-sized context window**: detects each model's real window so auto-compact stops assuming 200k
+- **Config backup & sync**: push `~/.claude` to a gist or private repo, restore it on any machine
 - **Tiny footprint**: pure POSIX sh — no python, no node; Homebrew pulls `jq` and `llm-models` for you
 - **Zero interference**: `claude` always works normally — `ccs` never touches your shell or Claude config
 - **Direct launch**: `ccs` starts Claude Code with the right env vars (scoped to that process)
@@ -44,6 +45,9 @@ This path skips the dependencies Homebrew would have installed. `ccs` runs fine 
 add [`llm-models`](https://github.com/maxgfr/llm-models) for context-window sizing and `jq` for
 `ccs notify` when you want those.
 
+`ccs sync` additionally needs `git` (and `gh`, only to create a gist or repo for you). Everything
+else works without them.
+
 ## Quick start
 
 ```sh
@@ -76,10 +80,24 @@ COMMANDS
     env                         Print export statements for current shell
     models [refresh|clear]      Show / refresh the context windows ccs will use
     notify on|off|status|test   Desktop notifications when Claude needs you
+    sync <subcommand>           Back up ~/.claude to a gist or repo
     reset                       Clear active provider (back to vanilla claude)
     purge                       Remove all ccs data (~/.claude-provider/)
     help                        Show help
     version                     Show version
+
+SYNC SUBCOMMANDS
+    sync init --gist-new        Create a secret gist and use it (needs gh)
+    sync init --repo-new <name> Create a private repo and use it (needs gh)
+    sync init --gist <id|url>   Use a gist you already have
+    sync init --repo <url>      Use a repo you already have
+    sync push [--force]         Back up ~/.claude to the remote
+    sync pull [--additive]      Restore ~/.claude from the remote
+    sync import <id|url>        Import someone else's config (asks first)
+    sync status                 Remote, scope, last sync, what would push
+    sync auto on|off            Sync on every 'ccs' launch (default: off)
+    sync hooks on|off           Sync on Claude Code session start/end
+    sync off                    Forget the remote, touch no files
 ```
 
 ### Examples
@@ -188,6 +206,22 @@ haiku_model=glm-4.7
 - **`max_output_tokens=`** — optional, pins the output limit (plain integer; empty means auto)
 - **`auto_context=`** — in `[_defaults]`, set to `false` to disable the automatic lookup
 
+Sections whose name starts with `_` are **reserved**: they hold settings, never providers, so they
+never show up in `ccs list`. Alongside `[_defaults]` there is `[_sync]`, normally written by
+`ccs sync init`:
+
+```ini
+[_sync]
+remote=https://gist.github.com/<id>.git
+kind=gist            # gist | repo
+include_ccs=false    # also back up this file, with every api_key= blanked
+auto_launch=false    # sync on every `ccs` launch
+auto_hooks=false     # written by `ccs sync hooks on|off`
+prune=true           # a pull mirrors the remote; false only ever adds
+```
+
+Values run to the end of the line, so no trailing comments.
+
 ## Context window
 
 Claude Code assumes a **200k** context window for any model it doesn't ship in its own table, so on
@@ -290,7 +324,99 @@ How it works:
 - A `Notification` hook notifies only when Claude needs *you* (`permission_prompt`, `agent_needs_input`, `elicitation_dialog`, `idle_prompt`) and ignores `agent_completed`, which fires for every background task.
 - The badge only shows while the terminal is unfocused, and clears when you come back.
 
-> **Note:** `ccs notify on` is the **single exception** to the zero-interference principle: it edits `~/.claude/settings.json` (hooks + `preferredNotifChannel`). It is explicit opt-in, backs up your settings to `~/.claude-provider/settings-backup.json`, and `ccs notify off` restores the previous state. Hook scripts live in `~/.claude-provider/hooks/`.
+> **Note:** `ccs notify on` is one of the two exceptions to the zero-interference principle (the other is `ccs sync`): it edits `~/.claude/settings.json` (hooks + `preferredNotifChannel`). It is explicit opt-in, backs up your settings to `~/.claude-provider/settings-backup.json`, and `ccs notify off` restores the previous state. Hook scripts live in `~/.claude-provider/hooks/`.
+
+## Config backup & sync
+
+Reinstalling Claude Code means rebuilding your global `CLAUDE.md`, your settings, your skills and
+your commands by hand. `ccs sync` backs up **the part of `~/.claude` that makes a good install** to
+a GitHub gist or a private repo, and puts it back on any other machine.
+
+```sh
+ccs sync init --gist-new       # create a secret gist (or --repo-new <name>)
+ccs sync push                  # back up ~/.claude
+ccs sync status                # remote, scope, last sync, what would push
+
+# on the new machine
+ccs sync init --gist <id>
+ccs sync pull                  # restore
+
+# somebody else's setup, without adopting their remote
+ccs sync import <gist-url>
+```
+
+### What is backed up
+
+An **allow-list**, never a deny-list — a lived-in `~/.claude` runs to gigabytes of transcripts and
+job state, none of which helps you reinstall:
+
+| Backed up | Never leaves the machine |
+|-----------|--------------------------|
+| `CLAUDE.md` | `projects/`, `jobs/`, `transcripts/`, `plans/` |
+| `settings.json` | `history.jsonl`, `shell-snapshots/`, `file-history/` |
+| `agents/`, `commands/`, `skills/`, `output-styles/`, `hooks/` | `.credentials.json`, `~/.claude.json` |
+| `plugins/installed_plugins.json`, `plugins/known_marketplaces.json` | `settings.local.json`, every cache |
+
+Three things happen on the way out, so the config actually works when it lands:
+
+- **Symlinks are dereferenced.** A `skills/` directory full of links into another checkout is
+  copied by content — otherwise the other machine gets dangling links.
+- **`$HOME` is replaced by a placeholder** in every text file, and restored on pull. A `statusLine`
+  command or a hook path survives a move to a machine with a different home directory.
+- **ccs's own hook entries are stripped** from `settings.json` and re-attached from local state on
+  pull, so you never inherit hooks pointing at scripts your machine does not have.
+
+A **secret scan** runs before every push and refuses to publish anything shaped like a credential
+(`sk-ant-…`, `ghp_…`, AWS keys, private key blocks, an `apiKey` field). `--force` overrides it.
+
+### Gist or repo
+
+Both are git remotes, so it is one engine. The difference is cosmetic: GitHub's gist UI hides
+subdirectories, so a gist stores a flat tree with `/` percent-encoded
+(`skills%2Fmy-skill%2FSKILL.md`) and a repo stores the real one. `ccs sync pull` and
+`ccs sync import` rebuild the tree either way.
+
+`git` is required. `gh` only for `--gist-new` / `--repo-new` — otherwise pass a URL you already
+have. Pushing uses your existing git credentials (SSH key or the `gh` credential helper).
+
+### Restoring, and what a pull can cost you
+
+A pull **mirrors** the remote: a file deleted there is deleted here. `--additive` (or
+`prune=false`) only ever adds. Either way `~/.claude` is snapshotted into
+`~/.claude-provider/sync-backup/<timestamp>/` before a single byte is written, and
+`ccs sync pull --dry-run` shows the change first.
+
+### Automatic sync
+
+**Manual by default.** Two opt-in triggers:
+
+```sh
+ccs sync auto on      # sync at the start of every `ccs` launch
+ccs sync hooks on     # sync on Claude Code session start / end
+```
+
+`auto on` gets a five-second budget and can never stop Claude Code from starting: an unreachable
+remote, a conflicting history or a detected secret produces a warning and the launch continues.
+`hooks on` installs `SessionStart`/`SessionEnd` hooks alongside the notification ones — the two
+families are independent, so `ccs notify off` does not unhook sync.
+
+### Syncing the ccs config too
+
+Off by default. Turn it on to carry your providers, models and context pins across machines:
+
+```ini
+[_sync]
+include_ccs=true
+```
+
+Every `api_key=` is blanked before the file leaves the machine, and the `[_sync]` section itself is
+stripped so nobody importing your config ends up pointing at your remote. On the way back in, a key
+is only ever written when the local one is empty — **a pull can never cost you an API key**.
+
+> **Note:** `ccs sync` is the second exception to the zero-interference principle: `pull` and
+> `import` write into `~/.claude`. Both are explicit commands, both snapshot first, and nothing
+> outside the allow-list above is ever read or written. `ccs sync off` forgets the remote and
+> leaves every file alone.
 
 ## Shell integration
 
@@ -334,6 +460,10 @@ If **no provider is configured at all** (no active provider, no API key in the d
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | Third-party — the model's real output limit        |
 
 State is persisted in `~/.claude-provider/active` so `ccs` works across shell sessions. Run `ccs reset` to clear it, or `ccs purge` to remove all ccs data.
+
+Everything ccs owns lives in `~/.claude-provider/`: `config`, `active`, `models-cache`,
+`hooks/` (notify + sync), `sync/` (the git working copy) and `sync-backup/` (the snapshots taken
+before a restore). `ccs reset` only clears `active`; `ccs purge` removes the lot.
 
 ## Contributing
 

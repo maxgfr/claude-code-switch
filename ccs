@@ -13,8 +13,25 @@ NOTIFY_STATE_FILE="${CONFIG_DIR}/notify-state"
 MODELS_CACHE="${CONFIG_DIR}/models-cache"
 MODELS_CACHE_TTL=604800   # 7 days — context windows change on model releases
 SETTINGS_BACKUP="${CONFIG_DIR}/settings-backup.json"
-CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
+CLAUDE_DIR="${HOME}/.claude"
+CLAUDE_SETTINGS="${CLAUDE_DIR}/settings.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# --- Sync constants ---
+SYNC_DIR="${CONFIG_DIR}/sync"                 # git working copy mirroring the remote
+SYNC_BACKUP_DIR="${CONFIG_DIR}/sync-backup"   # ~/.claude snapshots, one per apply
+SYNC_STATE_FILE="${CONFIG_DIR}/sync-state"
+SYNC_MANIFEST=".ccs-sync"
+SYNC_HOME_TOKEN="__CCS_HOME__"                # stands in for $HOME in the remote
+SYNC_TIMEOUT=5                                # seconds the auto sync may steal from a launch
+
+# The allow-list of everything ccs backs up, relative to ~/.claude. It is
+# deliberately an allow-list: a real ~/.claude runs to gigabytes of transcripts,
+# job state and caches, none of which help you rebuild a good install. Anything
+# absent from this line is never read and never written — projects/, jobs/,
+# transcripts/, history.jsonl, file-history/, shell-snapshots/, telemetry/,
+# .credentials.json, settings.local.json and ~/.claude.json included.
+SYNC_PATHS="CLAUDE.md settings.json agents commands skills output-styles hooks plugins/installed_plugins.json plugins/known_marketplaces.json"
 
 # --- Colors (only when stdout is a terminal) ---
 if [ -t 1 ]; then
@@ -91,7 +108,10 @@ parse_config() {
                         warn "Skipping invalid section name: $current_section"
                         current_section=""
                         ;;
-                    _defaults) ;;
+                    # A leading underscore marks a reserved section ([_defaults],
+                    # [_sync]): parsed into cfg_* like any other, but never a
+                    # provider, so it stays out of `ccs list` and `ccs use`.
+                    _*) ;;
                     *)
                         # Add to providers list
                         PROVIDERS="${PROVIDERS:+$PROVIDERS }$current_section"
@@ -186,6 +206,14 @@ require_config() {
 provider=anthropic
 model=claude-sonnet-5
 auto_context=true
+
+[_sync]
+remote=
+kind=repo
+include_ccs=false
+auto_launch=false
+auto_hooks=false
+prune=true
 
 [anthropic]
 base_url=
@@ -662,6 +690,10 @@ launch_vanilla() {
 }
 
 cmd_launch() {
+    # Config sync runs before anything provider-related: it is about ~/.claude,
+    # not about which model answers. It can never stop the launch.
+    sync_auto_launch
+
     # Active state first, then [_defaults]; neither usable means vanilla claude
     if ! load_state; then
         launch_vanilla "$@"
@@ -800,10 +832,24 @@ ${C_BOLD}COMMANDS${C_RESET}
     env                         Print export statements for current shell
     models [refresh|clear]      Show / refresh the context windows ccs will use
     notify on|off|status|test   Desktop notifications when Claude needs you
+    sync <subcommand>           Back up ~/.claude to a gist or repo (see below)
     reset                       Clear active provider (back to vanilla claude)
     purge                       Remove all ccs data (~/.claude-provider/)
     help                        Show this help
     version                     Show version
+
+${C_BOLD}SYNC SUBCOMMANDS${C_RESET}
+    sync init --gist-new        Create a secret gist and use it (needs gh)
+    sync init --repo-new <name> Create a private repo and use it (needs gh)
+    sync init --gist <id|url>   Use a gist you already have
+    sync init --repo <url>      Use a repo you already have
+    sync push [--force]         Back up ~/.claude to the remote
+    sync pull [--additive]      Restore ~/.claude from the remote
+    sync import <id|url>        Import someone else's config (asks first)
+    sync status                 Remote, scope, last sync, what would push
+    sync auto on|off            Sync on every 'ccs' launch (default: off)
+    sync hooks on|off           Sync on Claude Code session start/end
+    sync off                    Forget the remote, touch no files
 
 ${C_BOLD}EXAMPLES${C_RESET}
     ccs use zai                        Switch to Z.AI (saved as default)
@@ -814,6 +860,9 @@ ${C_BOLD}EXAMPLES${C_RESET}
     ccs models                         Show the context window per model tier
     ccs notify on                      Notify on task end + questions (needs jq)
     ccs notify on iterm2               Pin the terminal instead of auto-detect
+    ccs sync init --gist-new           Create a secret gist for your config
+    ccs sync push                      Back it up
+    ccs sync import <gist-url>         Rebuild a good install elsewhere
 
 ${C_BOLD}CONTEXT WINDOW${C_RESET}
     ccs sizes CLAUDE_CODE_MAX_CONTEXT_TOKENS from the model's real window, so
@@ -826,6 +875,21 @@ ${C_BOLD}CONTEXT WINDOW${C_RESET}
 
     Pin a window by hand with context_tokens= in the provider's config
     section; auto_context=false in [_defaults] turns the whole thing off.
+
+${C_BOLD}CONFIG SYNC${C_RESET}
+    'ccs sync' backs up what makes a good Claude Code install — global
+    CLAUDE.md, settings.json, agents/, commands/, skills/, output-styles/,
+    hooks/ and the plugin manifest — to a gist or a private repo, and restores
+    it on another machine. Transcripts, projects, jobs and caches never leave.
+
+    Needs git. 'gh' only for --gist-new / --repo-new. Manual by default;
+    'ccs sync auto on' syncs on every launch, 'ccs sync hooks on' on every
+    Claude Code session. A pull mirrors the remote (--additive only ever adds)
+    and always snapshots ~/.claude first into
+        ${SYNC_BACKUP_DIR}
+
+    Set include_ccs=true in [_sync] to back up this config too — every
+    api_key= is blanked before it leaves the machine.
 
 ${C_BOLD}CONFIG${C_RESET}
     ${CONFIG_FILE}
@@ -905,11 +969,12 @@ cmd_reset() {
 }
 
 cmd_purge() {
-    # Detach notification hooks first — otherwise ~/.claude/settings.json
-    # would reference scripts that no longer exist.
-    if [ -f "$CLAUDE_SETTINGS" ] && grep -qF '/.claude-provider/hooks/' "$CLAUDE_SETTINGS" 2>/dev/null; then
+    # Detach every ccs hook first — otherwise ~/.claude/settings.json would
+    # reference scripts that no longer exist.
+    if [ -f "$CLAUDE_SETTINGS" ] && grep -qF "$CCS_HOOK_MARKER" "$CLAUDE_SETTINGS" 2>/dev/null; then
         if command -v jq >/dev/null 2>&1; then
             notify_off
+            settings_detach_hooks "$CCS_HOOK_MARKER" SessionStart SessionEnd
         else
             warn "jq not found — remove the ccs hooks from $CLAUDE_SETTINGS manually"
         fi
@@ -926,6 +991,70 @@ cmd_purge() {
 require_jq() {
     command -v jq >/dev/null 2>&1 || \
         die "jq is required for notifications. Install it: brew install jq"
+}
+
+# --- Claude Code settings (~/.claude/settings.json) ---
+# Every write to Claude Code's own settings goes through these three helpers, so
+# `notify` and `sync hooks` can each own their events without stepping on the
+# other's entries — or on the user's.
+
+# Any hook command pointing into ~/.claude-provider/hooks/ is ccs-generated
+CCS_HOOK_MARKER="/.claude-provider/hooks/"
+
+# Refuse to touch a broken settings.json (it silently disables ALL Claude Code
+# settings), and keep a copy of what was there before ccs got involved.
+settings_prepare() {
+    require_jq
+    mkdir -p "$CLAUDE_DIR"
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        jq empty "$CLAUDE_SETTINGS" 2>/dev/null || \
+            die "$CLAUDE_SETTINGS is not valid JSON — fix it before letting ccs write to it"
+        cp "$CLAUDE_SETTINGS" "$SETTINGS_BACKUP"
+    else
+        printf '{}\n' > "$CLAUDE_SETTINGS"
+    fi
+}
+
+settings_set_key() {
+    local key="$1" value="$2" tmpfile
+    tmpfile=$(mktemp)
+    jq --arg k "$key" --arg v "$value" '.[$k] = $v' "$CLAUDE_SETTINGS" > "$tmpfile"
+    mv "$tmpfile" "$CLAUDE_SETTINGS"
+}
+
+# settings_attach_hook <event> <script> — idempotent: an entry for this exact
+# script is replaced, never duplicated; every other entry is preserved.
+settings_attach_hook() {
+    local event="$1" script="$2" tmpfile
+    tmpfile=$(mktemp)
+    jq --arg ev "$event" --arg cmd "$script" '
+        .hooks = (.hooks // {})
+        | .hooks[$ev] = ([(.hooks[$ev] // [])[]
+            | select([.hooks[]?.command // "" | . == $cmd] | any | not)]
+            + [{"hooks":[{"type":"command","command":$cmd}]}])
+    ' "$CLAUDE_SETTINGS" > "$tmpfile"
+    mv "$tmpfile" "$CLAUDE_SETTINGS"
+}
+
+# settings_detach_hooks <command-substring> <event>... — drop matching entries
+# from the named events only, then tidy up empties. Scoping by event is what
+# keeps `notify off` from unhooking sync, and vice versa.
+settings_detach_hooks() {
+    local marker="$1" event tmpfile
+    shift
+    [ -f "$CLAUDE_SETTINGS" ] || return 0
+    for event in "$@"; do
+        tmpfile=$(mktemp)
+        jq --arg ev "$event" --arg m "$marker" '
+            def ours: [.hooks[]?.command // "" | contains($m)] | any;
+            if ((.hooks | type) == "object") and ((.hooks[$ev] | type) == "array") then
+                .hooks[$ev] = [.hooks[$ev][] | select(ours | not)]
+                | (if .hooks[$ev] == [] then del(.hooks[$ev]) else . end)
+                | (if .hooks == {} then del(.hooks) else . end)
+            else . end
+        ' "$CLAUDE_SETTINGS" > "$tmpfile"
+        mv "$tmpfile" "$CLAUDE_SETTINGS"
+    done
 }
 
 # Generate the three hook scripts into ~/.claude-provider/hooks/
@@ -1023,16 +1152,7 @@ notify_on() {
         *) die "Unknown terminal '$method'. Valid: ghostty iterm2 wezterm kitty macos bell (or omit for auto-detect)" ;;
     esac
 
-    # Validate existing settings.json before touching anything — a broken
-    # settings.json silently disables ALL Claude Code settings.
-    mkdir -p "${HOME}/.claude"
-    if [ -f "$CLAUDE_SETTINGS" ]; then
-        jq empty "$CLAUDE_SETTINGS" 2>/dev/null || \
-            die "$CLAUDE_SETTINGS is not valid JSON — fix it before running ccs notify on"
-        cp "$CLAUDE_SETTINGS" "$SETTINGS_BACKUP"
-    else
-        printf '{}\n' > "$CLAUDE_SETTINGS"
-    fi
+    settings_prepare
 
     # Remember the pre-ccs preferredNotifChannel so `off` can restore it.
     # Only on first install: re-running `on` must not clobber the original.
@@ -1048,19 +1168,10 @@ notify_on() {
     # .claude-provider/hooks/ are replaced, everything else is preserved.
     # The built-in channel is disabled: it notifies on every background-task
     # completion, which is exactly the noise this feature avoids.
-    local tmpfile
-    tmpfile=$(mktemp)
-    jq --arg stop "${HOOKS_DIR}/notify-stop.sh" \
-       --arg attn "${HOOKS_DIR}/notify-attention.sh" '
-        def ours: [.hooks[]?.command // "" | contains("/.claude-provider/hooks/")] | any;
-        .preferredNotifChannel = "notifications_disabled"
-        | .hooks = (.hooks // {})
-        | .hooks.Stop = ([(.hooks.Stop // [])[] | select(ours | not)]
-            + [{"hooks":[{"type":"command","command":$stop}]}])
-        | .hooks.Notification = ([(.hooks.Notification // [])[] | select(ours | not)]
-            + [{"hooks":[{"type":"command","command":$attn}]}])
-    ' "$CLAUDE_SETTINGS" > "$tmpfile"
-    mv "$tmpfile" "$CLAUDE_SETTINGS"
+    settings_set_key preferredNotifChannel notifications_disabled
+    settings_detach_hooks "$CCS_HOOK_MARKER" Stop Notification
+    settings_attach_hook Stop "${HOOKS_DIR}/notify-stop.sh"
+    settings_attach_hook Notification "${HOOKS_DIR}/notify-attention.sh"
 
     info "Notifications installed (${C_BOLD}${method}${C_RESET})"
     printf '    Desktop notification + dock badge on task end and questions\n'
@@ -1070,24 +1181,27 @@ notify_on() {
 }
 
 notify_off() {
-    if [ -f "$CLAUDE_SETTINGS" ] && grep -qF '/.claude-provider/hooks/' "$CLAUDE_SETTINGS" 2>/dev/null; then
+    if [ -f "$CLAUDE_SETTINGS" ] && grep -qF "$CCS_HOOK_MARKER" "$CLAUDE_SETTINGS" 2>/dev/null; then
         require_jq
-        local prev tmpfile
-        prev=$(sed -n 's/^PREV_CHANNEL=//p' "$NOTIFY_STATE_FILE" 2>/dev/null || true)
-        tmpfile=$(mktemp)
-        jq --arg prev "${prev:-__ABSENT__}" '
-            def ours: [.hooks[]?.command // "" | contains("/.claude-provider/hooks/")] | any;
-            .hooks.Stop = [(.hooks.Stop // [])[] | select(ours | not)]
-            | .hooks.Notification = [(.hooks.Notification // [])[] | select(ours | not)]
-            | (if .hooks.Stop == [] then del(.hooks.Stop) else . end)
-            | (if .hooks.Notification == [] then del(.hooks.Notification) else . end)
-            | (if .hooks == {} then del(.hooks) else . end)
-            | (if $prev == "__ABSENT__" then del(.preferredNotifChannel)
-               else .preferredNotifChannel = $prev end)
-        ' "$CLAUDE_SETTINGS" > "$tmpfile"
-        mv "$tmpfile" "$CLAUDE_SETTINGS"
+        settings_detach_hooks "$CCS_HOOK_MARKER" Stop Notification
+        # Only restore the channel if we are the ones who changed it — with
+        # `sync hooks` installed the marker is present even when notify is not.
+        if [ -f "$NOTIFY_STATE_FILE" ]; then
+            local prev tmpfile
+            prev=$(sed -n 's/^PREV_CHANNEL=//p' "$NOTIFY_STATE_FILE" 2>/dev/null || true)
+            tmpfile=$(mktemp)
+            jq --arg prev "${prev:-__ABSENT__}" '
+                if $prev == "__ABSENT__" then del(.preferredNotifChannel)
+                else .preferredNotifChannel = $prev end
+            ' "$CLAUDE_SETTINGS" > "$tmpfile"
+            mv "$tmpfile" "$CLAUDE_SETTINGS"
+        fi
     fi
-    rm -rf "$HOOKS_DIR"
+    # Only our own scripts — `sync hooks` shares this directory
+    rm -f "${HOOKS_DIR}/notify-emit.sh" \
+          "${HOOKS_DIR}/notify-stop.sh" \
+          "${HOOKS_DIR}/notify-attention.sh"
+    rmdir "$HOOKS_DIR" 2>/dev/null || true
     rm -f "$NOTIFY_STATE_FILE"
     info "Notifications removed — Claude Code settings restored"
 }
@@ -1121,6 +1235,1010 @@ cmd_notify() {
         status) notify_status ;;
         test)   notify_test ;;
         *)      die "Unknown notify subcommand '$sub'. Usage: ccs notify on|off|status|test" ;;
+    esac
+}
+
+# --- Sync ---
+# `ccs sync` backs up the part of ~/.claude that lets you rebuild a good install
+# — global CLAUDE.md, settings, agents, commands, skills, output styles, hooks,
+# the plugin manifest — to a GitHub gist or repo, and restores it elsewhere.
+#
+# It is the second and last feature that writes to Claude Code's own files,
+# after `ccs notify`. Same contract: explicit opt-in, a timestamped backup
+# before every write, and nothing outside $SYNC_PATHS is ever read or written.
+#
+# One engine for both backends, because a gist is a git repository too. The only
+# difference: GitHub's gist UI hides subdirectories, so a gist stores a flat
+# tree with "/" percent-encoded, while a repo stores the real one.
+
+have_git() {
+    command -v git >/dev/null 2>&1
+}
+
+require_git() {
+    have_git || die "git is required for ccs sync. Install it first."
+}
+
+# All git in the working copy goes through here. CCS_SYNC_BATCH (set by the
+# auto/hook paths) forbids any credential prompt, so an unattended sync fails
+# fast instead of hanging a launch.
+sync_git() {
+    if [ -n "${CCS_SYNC_BATCH:-}" ]; then
+        GIT_TERMINAL_PROMPT=0 \
+        GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}" \
+            git -C "$SYNC_DIR" "$@"
+    else
+        git -C "$SYNC_DIR" "$@"
+    fi
+}
+
+load_sync_cfg() {
+    if [ -z "${PROVIDERS+x}" ]; then
+        parse_config || true
+    fi
+    SYNC_REMOTE=$(get_cfg "_sync" "remote")
+    SYNC_KIND=$(get_cfg "_sync" "kind")
+    SYNC_INCLUDE_CCS=$(get_cfg "_sync" "include_ccs")
+    SYNC_AUTO_LAUNCH=$(get_cfg "_sync" "auto_launch")
+    SYNC_AUTO_HOOKS=$(get_cfg "_sync" "auto_hooks")
+    SYNC_PRUNE=$(get_cfg "_sync" "prune")
+    [ -n "$SYNC_KIND" ] || SYNC_KIND="repo"
+    [ -n "$SYNC_PRUNE" ] || SYNC_PRUNE="true"
+}
+
+sync_require_remote() {
+    if [ -z "${SYNC_REMOTE:-}" ]; then
+        die "no sync remote configured. Set one up first:
+    ccs sync init --gist-new            create a secret gist (needs gh)
+    ccs sync init --repo-new <name>     create a private repo (needs gh)
+    ccs sync init --gist <id|url>       use one you already have
+    ccs sync init --repo <url>"
+    fi
+}
+
+# Set (or add) key=value inside a config section, creating the section if needed
+config_set() {
+    local section="$1" key="$2" value="$3" tmp
+    require_config
+    tmp=$(mktemp)
+    awk -v sec="$section" -v k="$key" -v v="$value" '
+        BEGIN { srx = "^[ \t]*\\[" sec "\\][ \t]*$"; krx = "^[ \t]*" k "[ \t]*=" }
+        $0 ~ srx { in_s = 1; seen = 1; print; next }
+        /^[ \t]*\[/ {
+            if (in_s && !done) { print k "=" v; done = 1 }
+            in_s = 0; print; next
+        }
+        in_s && $0 ~ krx { print k "=" v; done = 1; next }
+        { print }
+        END {
+            if (in_s && !done) { print k "=" v; done = 1 }
+            if (!seen) { printf "\n[%s]\n%s=%s\n", sec, k, v }
+        }
+    ' "$CONFIG_FILE" > "$tmp"
+    mv "$tmp" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+    # Keep the already-parsed view consistent for the rest of this run
+    eval "cfg_${section}_${key}=\"\$value\""
+}
+
+# Accept a gist id, an owner/repo shorthand, a full URL or a local path
+sync_normalize_remote() {
+    local src="$1"
+    case "$src" in
+        *gist.github.com*) printf '%s.git' "${src%.git}" ;;
+        *://*|*@*:*|/*)    printf '%s' "$src" ;;
+        */*)               printf 'https://github.com/%s.git' "${src%.git}" ;;
+        *[!0-9a-fA-F]*)
+            die "cannot tell what '$src' is. Pass a gist id, owner/repo, or a git URL." ;;
+        ?*)                printf 'https://gist.github.com/%s.git' "$src" ;;
+        *)                 die "empty remote" ;;
+    esac
+}
+
+sync_kind_for_remote() {
+    case "$1" in
+        *gist.github.com*) printf 'gist' ;;
+        *)                 printf 'repo' ;;
+    esac
+}
+
+sed_escape_pattern() {
+    printf '%s' "$1" | sed 's/[][\\.*^$|]/\\&/g'
+}
+
+sed_escape_replacement() {
+    printf '%s' "$1" | sed 's/[\\&|]/\\&/g'
+}
+
+# Which allow-listed paths actually exist under a root
+sync_existing_paths() {
+    local root="$1" p out=""
+    for p in $SYNC_PATHS; do
+        if [ -e "${root}/${p}" ]; then
+            out="${out:+$out }${p}"
+        fi
+    done
+    printf '%s' "$out"
+}
+
+# Copy allow-listed paths between two roots. `tar -h` dereferences symlinks —
+# ~/.claude/skills is routinely a directory of links into another checkout, and
+# copying the links themselves would land a broken config on the other machine.
+sync_copy_tree() {
+    local src="$1" dst="$2" err
+    shift 2
+    [ $# -gt 0 ] || return 0
+    mkdir -p "$dst"
+    err=$(mktemp)
+    ( cd "$src" && tar -chf - "$@" 2>"$err" ) | ( cd "$dst" && tar -xf - )
+    if [ -s "$err" ]; then
+        warn "some files could not be read (broken symlink?):"
+        sed 's/^/    /' "$err" >&2
+    fi
+    rm -f "$err"
+    return 0
+}
+
+# Everything but .git — ccs owns this working copy entirely, and wiping it makes
+# `git add -A` report deletions, which is what mirror semantics need.
+sync_wipe_worktree() {
+    [ -d "$SYNC_DIR" ] || return 0
+    find "$SYNC_DIR" -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} +
+    return 0
+}
+
+# Swap $HOME for a placeholder (and back) across a staged tree, so hook commands
+# and any absolute path survive a move to a machine with a different $HOME.
+# Only ever runs on a staging tree — never walks ~/.claude itself.
+sync_rewrite_home() {
+    local root="$1" from="$2" to="$3" pat rep f tmp
+    [ -d "$root" ] || return 0
+    pat=$(sed_escape_pattern "$from")
+    rep=$(sed_escape_replacement "$to")
+    find "$root" -type f -not -path '*/.git/*' -print | while IFS= read -r f; do
+        if grep -FIq -- "$from" "$f" 2>/dev/null; then
+            tmp="${f}.ccs-rewrite"
+            if sed "s|${pat}|${rep}|g" "$f" > "$tmp" 2>/dev/null; then
+                cat "$tmp" > "$f"      # preserves the mode, unlike mv
+            fi
+            rm -f "$tmp"
+        fi
+    done
+    return 0
+}
+
+# ccs's own hook entries point at scripts generated locally by `ccs notify on` /
+# `ccs sync hooks on`. Publishing them would leave the other machine with hooks
+# pointing at files it does not have, so they are stripped on the way out and
+# re-attached from local state on the way in.
+sync_strip_ccs_hooks() {
+    local file="$1" tmp
+    [ -f "$file" ] || return 0
+    if ! command -v jq >/dev/null 2>&1; then
+        warn "jq not found — settings.json is backed up with its local ccs hook paths"
+        return 0
+    fi
+    tmp=$(mktemp)
+    if jq --arg m "$CCS_HOOK_MARKER" '
+        def ours: [.hooks[]?.command // "" | contains($m)] | any;
+        if (.hooks | type) == "object" then
+            .hooks = (.hooks
+                | with_entries(if (.value | type) == "array"
+                               then .value |= [.[] | select(ours | not)]
+                               else . end)
+                | with_entries(select(.value != [])))
+            | (if .hooks == {} then del(.hooks) else . end)
+        else . end
+    ' "$file" > "$tmp" 2>/dev/null; then
+        cat "$tmp" > "$file"
+    else
+        warn "could not filter ccs hooks out of settings.json — backing it up as is"
+    fi
+    rm -f "$tmp"
+    return 0
+}
+
+sync_reattach_ccs_hooks() {
+    command -v jq >/dev/null 2>&1 || return 0
+    [ -f "$CLAUDE_SETTINGS" ] || return 0
+    jq empty "$CLAUDE_SETTINGS" 2>/dev/null || return 0
+    if [ -x "${HOOKS_DIR}/notify-stop.sh" ]; then
+        settings_attach_hook Stop "${HOOKS_DIR}/notify-stop.sh"
+        settings_attach_hook Notification "${HOOKS_DIR}/notify-attention.sh"
+    fi
+    if [ -x "${HOOKS_DIR}/sync-pull.sh" ]; then
+        settings_attach_hook SessionStart "${HOOKS_DIR}/sync-pull.sh"
+        settings_attach_hook SessionEnd "${HOOKS_DIR}/sync-push.sh"
+    fi
+    return 0
+}
+
+# gist storage: skills/foo/SKILL.md <-> skills%2Ffoo%2FSKILL.md
+# "%" is encoded first and decoded last, so the mapping is lossless.
+sync_flatten_tree() {
+    local root="$1"
+    ( cd "$root" || exit 1
+      find . -type f -not -path './.git/*' | sed 's|^\./||' | while IFS= read -r rel; do
+          case "$rel" in
+              */*) ;;
+              *) continue ;;
+          esac
+          mv "$rel" "$(printf '%s' "$rel" | sed 's/%/%25/g; s#/#%2F#g')"
+      done
+      # Sweep the now-empty directories; rmdir refuses the rest, which is fine
+      find . -depth -type d -not -name '.git' -not -path './.git/*' \
+          -exec rmdir {} + 2>/dev/null || true
+      exit 0 )
+    return 0
+}
+
+sync_unflatten_tree() {
+    local root="$1"
+    ( cd "$root" || exit 1
+      find . -maxdepth 1 -type f -name '*%2F*' | sed 's|^\./||' | while IFS= read -r name; do
+          dec=$(printf '%s' "$name" | sed 's/%2F/\//g; s/%25/%/g')
+          mkdir -p "$(dirname "$dec")"
+          mv "$name" "$dec"
+      done
+      exit 0 )
+    return 0
+}
+
+# Deliberately free of a timestamp: the manifest has to be byte-identical when
+# nothing changed, or every push would produce a commit — once per launch under
+# `sync auto on`. The commit itself already records when it happened.
+sync_write_manifest() {
+    cat > "${SYNC_DIR}/${SYNC_MANIFEST}" <<EOF
+# Claude Code config, backed up by ccs (claude-code-switch).
+# Restore it anywhere with:  ccs sync import <this gist or repo>
+ccs_version=${VERSION}
+kind=${SYNC_KIND}
+paths=${SYNC_PATHS}
+EOF
+}
+
+sync_detect_kind() {
+    local repo="$1" k
+    k=$(sed -n 's/^kind=//p' "${repo}/${SYNC_MANIFEST}" 2>/dev/null | head -1) || k=""
+    if [ -n "$k" ]; then
+        printf '%s' "$k"
+    elif ( cd "$repo" && git ls-files ) 2>/dev/null | grep -q '%2F'; then
+        printf 'gist'
+    else
+        printf 'repo'
+    fi
+}
+
+# Refuse to publish anything that looks like a credential. settings.json can
+# legitimately carry an env block, and a skill can carry an example key that is
+# not an example at all.
+sync_scan_secrets() {
+    local root="$1" hits
+    hits=$(grep -RInE --exclude-dir=.git \
+        -e 'sk-ant-[A-Za-z0-9_-]{12,}' \
+        -e 'sk-or-v1-[A-Za-z0-9]{12,}' \
+        -e 'sk-proj-[A-Za-z0-9_-]{12,}' \
+        -e 'ghp_[A-Za-z0-9]{20,}' \
+        -e 'github_pat_[A-Za-z0-9_]{20,}' \
+        -e 'AKIA[0-9A-Z]{16}' \
+        -e 'BEGIN [A-Z ]*PRIVATE KEY' \
+        -e '"apiKey"[[:space:]]*:[[:space:]]*"[^"]+"' \
+        -e 'ANTHROPIC_(API_KEY|AUTH_TOKEN)"?[[:space:]]*[:=][[:space:]]*"?[A-Za-z0-9_-]{12,}' \
+        "$root" 2>/dev/null) || hits=""
+    [ -n "$hits" ] || return 0
+    printf '%s\n' "$hits" | head -20 | sed "s|^${root}/|    |" >&2
+    return 1
+}
+
+# Build the tree to publish inside the working copy.
+# Returns 1 when ~/.claude holds nothing worth backing up — the caller decides
+# whether that is an error (push) or just something to report (status).
+sync_stage() {
+    local paths
+    paths=$(sync_existing_paths "$CLAUDE_DIR")
+    [ -n "$paths" ] || return 1
+    sync_wipe_worktree
+    # shellcheck disable=SC2086  # deliberate: $paths is a whitespace-separated list
+    sync_copy_tree "$CLAUDE_DIR" "$SYNC_DIR" $paths
+    sync_strip_ccs_hooks "${SYNC_DIR}/settings.json"
+    if [ "${SYNC_INCLUDE_CCS:-}" = "true" ]; then
+        mkdir -p "${SYNC_DIR}/ccs"
+        # Drop [_sync] (machine-specific, and importing it would point someone
+        # else's ccs at your remote) and blank every api_key= on the way out.
+        awk '
+            /^[ \t]*\[/ { in_sync = ($0 ~ /^[ \t]*\[_sync\][ \t]*$/) }
+            !in_sync { print }
+        ' "$CONFIG_FILE" \
+            | sed 's/^\([[:space:]]*api_key[[:space:]]*=\).*/\1/' \
+            > "${SYNC_DIR}/ccs/config"
+    fi
+    sync_write_manifest
+    sync_rewrite_home "$SYNC_DIR" "$HOME" "$SYNC_HOME_TOKEN"
+    if [ "$SYNC_KIND" = "gist" ]; then
+        sync_flatten_tree "$SYNC_DIR"
+    fi
+    return 0
+}
+
+sync_git_identity() {
+    sync_git config user.email "ccs@localhost" >/dev/null 2>&1 || true
+    sync_git config user.name "ccs" >/dev/null 2>&1 || true
+    sync_git config commit.gpgsign false >/dev/null 2>&1 || true
+    return 0
+}
+
+sync_clone() {
+    require_git
+    rm -rf "$SYNC_DIR"
+    mkdir -p "$CONFIG_DIR"
+    if ! git clone --quiet "$SYNC_REMOTE" "$SYNC_DIR" 2>/dev/null; then
+        rm -rf "$SYNC_DIR"
+        die "could not clone $SYNC_REMOTE
+    Check the URL and that your git credentials reach it:
+        git ls-remote $SYNC_REMOTE"
+    fi
+    sync_git_identity
+}
+
+sync_ensure_worktree() {
+    require_git
+    sync_require_remote
+    if [ ! -d "${SYNC_DIR}/.git" ]; then
+        sync_clone
+    else
+        sync_git remote set-url origin "$SYNC_REMOTE" 2>/dev/null \
+            || sync_git remote add origin "$SYNC_REMOTE"
+        sync_git_identity
+    fi
+    return 0
+}
+
+sync_branch() {
+    sync_git symbolic-ref --quiet --short HEAD 2>/dev/null || printf 'main'
+}
+
+# 0 = up to date, 1 = remote unreachable, 2 = histories conflict
+sync_fetch_rebase() {
+    local branch
+    sync_git fetch --quiet origin 2>/dev/null || return 1
+    branch=$(sync_branch)
+    if ! sync_git rev-parse --verify -q "refs/remotes/origin/${branch}" >/dev/null 2>&1; then
+        return 0        # remote branch does not exist yet — first push will create it
+    fi
+    if ! sync_git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+        sync_git reset --hard --quiet "origin/${branch}"
+        return 0
+    fi
+    if ! sync_git rebase --quiet "origin/${branch}" >/dev/null 2>&1; then
+        sync_git rebase --abort >/dev/null 2>&1 || true
+        return 2
+    fi
+    return 0
+}
+
+sync_push_remote() {
+    local branch
+    branch=$(sync_branch)
+    sync_git push --quiet -u origin "HEAD:refs/heads/${branch}" 2>/dev/null
+}
+
+# Reconstruct the real tree from a checkout, without touching the checkout
+sync_materialize() {
+    local repo="$1" dest="$2" kind="$3" f
+    rm -rf "$dest"
+    mkdir -p "$dest"
+    ( cd "$repo" && git ls-files ) 2>/dev/null | while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        mkdir -p "${dest}/$(dirname "$f")"
+        cp -p "${repo}/${f}" "${dest}/${f}" 2>/dev/null || true
+    done
+    if [ "$kind" = "gist" ]; then
+        sync_unflatten_tree "$dest"
+    fi
+    return 0
+}
+
+sync_backup_claude() {
+    local stamp dest paths
+    stamp=$(date -u '+%Y%m%d-%H%M%S' 2>/dev/null || date +%s)
+    dest="${SYNC_BACKUP_DIR}/${stamp}"
+    paths=$(sync_existing_paths "$CLAUDE_DIR")
+    SYNC_LAST_BACKUP=""
+    [ -n "$paths" ] || return 0
+    mkdir -p "$dest"
+    # shellcheck disable=SC2086  # deliberate: $paths is a whitespace-separated list
+    sync_copy_tree "$CLAUDE_DIR" "$dest" $paths
+    SYNC_LAST_BACKUP="$dest"
+    return 0
+}
+
+# sync_apply <tree> <prune> — the only function that writes into ~/.claude
+sync_apply() {
+    local tree="$1" prune="$2" p
+    mkdir -p "$CLAUDE_DIR"
+    for p in $SYNC_PATHS; do
+        if [ -e "${tree}/${p}" ]; then
+            if [ "$prune" = "true" ]; then
+                rm -rf "${CLAUDE_DIR:?}/${p}"
+            fi
+            mkdir -p "$(dirname "${CLAUDE_DIR}/${p}")"
+            ( cd "$tree" && tar -cf - "$p" ) | ( cd "$CLAUDE_DIR" && tar -xf - )
+        elif [ "$prune" = "true" ] && [ -e "${CLAUDE_DIR}/${p}" ]; then
+            rm -rf "${CLAUDE_DIR:?}/${p}"
+        fi
+    done
+    return 0
+}
+
+# Fold a synced ccs config into the local one. An api_key is only ever written
+# when the local one is empty, so a pull can never cost you a key.
+sync_merge_ccs_config() {
+    local remote="${1}/ccs/config" section="" line key value local_val count=0
+    [ -f "$remote" ] || return 0
+    parse_config || true
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        case "$line" in
+            ""|\#*) continue ;;
+            \[*\])
+                section=$(printf '%s' "$line" | sed 's/^\[//;s/\]$//')
+                case "$section" in
+                    *[!a-zA-Z0-9_]*|_sync) section="" ;;
+                esac
+                continue
+                ;;
+        esac
+        [ -n "$section" ] || continue
+        case "$line" in
+            *=*) ;;
+            *) continue ;;
+        esac
+        key=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
+        value="${line#*=}"
+        case "$key" in
+            *[!a-zA-Z0-9_]*|'') continue ;;
+        esac
+        if [ "$key" = "api_key" ]; then
+            local_val=$(get_cfg "$section" "api_key")
+            [ -z "$local_val" ] || continue
+            [ -n "$value" ] || continue
+        fi
+        config_set "$section" "$key" "$value"
+        count=$((count + 1))
+    done < "$remote"
+    if [ "$count" -gt 0 ]; then
+        info "Merged $count setting(s) into $CONFIG_FILE (API keys left alone)"
+    fi
+    return 0
+}
+
+sync_write_state() {
+    local now sha
+    now=$(date +%s 2>/dev/null || printf '0')
+    sha=$(sync_git rev-parse --short HEAD 2>/dev/null || printf '-')
+    printf 'LAST_SYNC=%s\nLAST_COMMIT=%s\n' "$now" "$sha" > "$SYNC_STATE_FILE"
+    chmod 600 "$SYNC_STATE_FILE"
+    return 0
+}
+
+sync_preview() {
+    local tree="$1" prune="$2" p
+    printf '\n'
+    for p in $SYNC_PATHS; do
+        if [ -e "${tree}/${p}" ] && [ -e "${CLAUDE_DIR}/${p}" ]; then
+            if diff -rq "${CLAUDE_DIR}/${p}" "${tree}/${p}" >/dev/null 2>&1; then
+                printf '  %s=%s  %s%s%s\n' "${C_DIM}" "${C_RESET}" "${C_DIM}" "$p" "${C_RESET}"
+            else
+                printf '  %s~%s  %s\n' "${C_YELLOW}" "${C_RESET}" "$p"
+            fi
+        elif [ -e "${tree}/${p}" ]; then
+            printf '  %s+%s  %s\n' "${C_GREEN}" "${C_RESET}" "$p"
+        elif [ "$prune" = "true" ] && [ -e "${CLAUDE_DIR}/${p}" ]; then
+            printf '  %s-%s  %s %s(removed)%s\n' "${C_RED}" "${C_RESET}" "$p" "${C_DIM}" "${C_RESET}"
+        fi
+    done
+    printf '\n'
+    return 0
+}
+
+# --- Sync commands ---
+
+cmd_sync_init() {
+    require_git
+    local target="" kind="" create=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --repo)
+                shift; target="${1:-}"; kind="repo"
+                [ -n "$target" ] || die "--repo needs a git URL" ;;
+            --gist)
+                shift; target="${1:-}"; kind="gist"
+                [ -n "$target" ] || die "--gist needs a gist id or URL" ;;
+            --repo-new)
+                shift; target="${1:-}"; kind="repo"; create="repo"
+                [ -n "$target" ] || die "--repo-new needs a repository name" ;;
+            --gist-new)
+                kind="gist"; create="gist" ;;
+            -*)
+                die "Unknown option '$1'. Usage: ccs sync init --gist-new | --repo-new <name> | --gist <id> | --repo <url>" ;;
+            *)
+                target="$1" ;;
+        esac
+        shift
+    done
+
+    if [ "$create" = "repo" ]; then
+        command -v gh >/dev/null 2>&1 || \
+            die "gh is required for --repo-new. Install it, or create the repo and pass --repo <url>."
+        gh repo create "$target" --private \
+            --description "Claude Code config, synced by ccs" >/dev/null \
+            || die "gh repo create failed"
+        target=$(gh repo view "$target" --json url -q .url 2>/dev/null) \
+            || die "repo created but its URL could not be read — pass it with --repo <url>"
+        target="${target}.git"
+        info "Created private repo $target"
+    elif [ "$create" = "gist" ]; then
+        command -v gh >/dev/null 2>&1 || \
+            die "gh is required for --gist-new. Install it, or create the gist and pass --gist <id>."
+        local seed url
+        seed=$(mktemp -d)
+        printf 'Claude Code config, synced by ccs.\nhttps://github.com/maxgfr/claude-code-switch\n' \
+            > "${seed}/README.md"
+        url=$(gh gist create "${seed}/README.md" --desc "Claude Code config (ccs sync)" 2>/dev/null | tail -1)
+        rm -rf "$seed"
+        [ -n "$url" ] || die "gh gist create failed"
+        target="$url"
+        info "Created secret gist $target"
+    fi
+
+    [ -n "$target" ] || \
+        die "Usage: ccs sync init --gist-new | --repo-new <name> | --gist <id|url> | --repo <url>"
+
+    SYNC_REMOTE=$(sync_normalize_remote "$target")
+    # A gist URL always means gist storage, whatever was asked for
+    case "$SYNC_REMOTE" in
+        *gist.github.com*) kind="gist" ;;
+    esac
+    [ -n "$kind" ] || kind=$(sync_kind_for_remote "$SYNC_REMOTE")
+
+    git ls-remote "$SYNC_REMOTE" >/dev/null 2>&1 || \
+        die "cannot reach $SYNC_REMOTE
+    Check the URL, and that git is authenticated for it (gh auth login, or an SSH key)."
+
+    config_set "_sync" "remote" "$SYNC_REMOTE"
+    config_set "_sync" "kind" "$kind"
+    SYNC_KIND="$kind"
+    sync_clone
+
+    info "Sync configured — ${C_BOLD}${kind}${C_RESET} at ${C_CYAN}${SYNC_REMOTE}${C_RESET}"
+    printf '    Back up now with %sccs sync push%s\n' "${C_BOLD}" "${C_RESET}"
+    printf '    %sManual by default%s — enable auto with %sccs sync auto on%s\n' \
+        "${C_DIM}" "${C_RESET}" "${C_BOLD}" "${C_RESET}"
+}
+
+cmd_sync_push() {
+    local force="" dry="" rc=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force)   force=1 ;;
+            --dry-run) dry=1 ;;
+            *) die "Usage: ccs sync push [--force] [--dry-run]" ;;
+        esac
+        shift
+    done
+
+    load_sync_cfg
+    sync_ensure_worktree
+    sync_stage || die "nothing to back up — $CLAUDE_DIR holds none of: $SYNC_PATHS"
+
+    if [ -z "$force" ]; then
+        if ! sync_scan_secrets "$SYNC_DIR"; then
+            die "the lines above look like credentials — remove them from your Claude Code config, or push anyway with --force"
+        fi
+    fi
+
+    sync_git add -A
+    local changed=""
+    if [ -n "$(sync_git status --porcelain)" ]; then
+        if [ -n "$dry" ]; then
+            printf '\n'
+            sync_git status --short | sed 's/^/  /'
+            printf '\n  %sDry run — nothing was pushed%s\n\n' "${C_DIM}" "${C_RESET}"
+            return 0
+        fi
+        sync_git commit -q -m "ccs sync from $(uname -n 2>/dev/null || printf 'unknown')"
+        changed=1
+    elif [ -n "$dry" ]; then
+        info "Nothing to push — the remote already matches $CLAUDE_DIR"
+        return 0
+    fi
+
+    # Even with nothing new to commit, still talk to the remote: a previous push
+    # may have committed locally and failed to reach it.
+    sync_fetch_rebase || rc=$?
+    case "$rc" in
+        1) die "could not reach $SYNC_REMOTE" ;;
+        2) die "the remote moved in a way that conflicts with this machine.
+    Run 'ccs sync pull' first, or inspect $SYNC_DIR" ;;
+    esac
+    sync_push_remote || die "push to $SYNC_REMOTE failed"
+    sync_write_state
+    if [ -n "$changed" ]; then
+        info "Backed up $CLAUDE_DIR to ${C_CYAN}${SYNC_REMOTE}${C_RESET}"
+    else
+        info "Already up to date — the remote matches $CLAUDE_DIR"
+    fi
+}
+
+cmd_sync_pull() {
+    local additive="" dry="" prune="true" rc=0 tree
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --additive) additive=1 ;;
+            --dry-run)  dry=1 ;;
+            *) die "Usage: ccs sync pull [--additive] [--dry-run]" ;;
+        esac
+        shift
+    done
+
+    load_sync_cfg
+    sync_ensure_worktree
+    # The working copy is a pure mirror; drop leftovers from an interrupted push
+    sync_git reset --hard --quiet HEAD >/dev/null 2>&1 || true
+    sync_git clean -fdq >/dev/null 2>&1 || true
+
+    sync_fetch_rebase || rc=$?
+    case "$rc" in
+        1) die "could not reach $SYNC_REMOTE" ;;
+        2) die "unpushed local changes conflict with the remote — inspect $SYNC_DIR" ;;
+    esac
+
+    tree=$(mktemp -d)
+    sync_materialize "$SYNC_DIR" "$tree" "$SYNC_KIND"
+    if [ ! -f "${tree}/${SYNC_MANIFEST}" ] && [ -z "$(sync_existing_paths "$tree")" ]; then
+        rm -rf "$tree"
+        die "the remote holds no ccs backup yet — run 'ccs sync push' first"
+    fi
+    sync_rewrite_home "$tree" "$SYNC_HOME_TOKEN" "$HOME"
+
+    if [ -n "$additive" ] || [ "$SYNC_PRUNE" = "false" ]; then
+        prune="false"
+    fi
+
+    if [ -n "$dry" ]; then
+        sync_preview "$tree" "$prune"
+        printf '  %sDry run — %s was not touched%s\n\n' "${C_DIM}" "$CLAUDE_DIR" "${C_RESET}"
+        rm -rf "$tree"
+        return 0
+    fi
+
+    sync_backup_claude
+    sync_apply "$tree" "$prune"
+    sync_reattach_ccs_hooks
+    if [ "${SYNC_INCLUDE_CCS:-}" = "true" ]; then
+        sync_merge_ccs_config "$tree"
+    fi
+    rm -rf "$tree"
+    sync_write_state
+
+    if [ "$prune" = "true" ]; then
+        info "Restored $CLAUDE_DIR from ${C_CYAN}${SYNC_REMOTE}${C_RESET} ${C_DIM}(mirror)${C_RESET}"
+    else
+        info "Restored $CLAUDE_DIR from ${C_CYAN}${SYNC_REMOTE}${C_RESET} ${C_DIM}(additive)${C_RESET}"
+    fi
+    if [ -n "${SYNC_LAST_BACKUP:-}" ]; then
+        printf '    Previous state kept in %s\n' "$SYNC_LAST_BACKUP"
+    fi
+}
+
+cmd_sync_import() {
+    local src="" adopt="" with_ccs="" yes="" additive="" prune="true"
+    local remote tmp tree kind reply
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --adopt)    adopt=1 ;;
+            --with-ccs) with_ccs=1 ;;
+            --yes|-y)   yes=1 ;;
+            --additive) additive=1 ;;
+            -*) die "Usage: ccs sync import <gist-id|url> [--adopt] [--with-ccs] [--additive] [--yes]" ;;
+            *)  src="$1" ;;
+        esac
+        shift
+    done
+    [ -n "$src" ] || die "Usage: ccs sync import <gist-id|owner/repo|url> [--adopt] [--with-ccs] [--additive] [--yes]"
+
+    require_git
+    load_sync_cfg
+    remote=$(sync_normalize_remote "$src")
+    tmp=$(mktemp -d)
+    if ! git clone --quiet --depth 1 "$remote" "${tmp}/repo" 2>/dev/null; then
+        rm -rf "$tmp"
+        die "could not clone $remote"
+    fi
+    kind=$(sync_detect_kind "${tmp}/repo")
+    tree="${tmp}/tree"
+    sync_materialize "${tmp}/repo" "$tree" "$kind"
+    if [ -z "$(sync_existing_paths "$tree")" ]; then
+        rm -rf "$tmp"
+        die "$remote does not look like a ccs config backup"
+    fi
+    sync_rewrite_home "$tree" "$SYNC_HOME_TOKEN" "$HOME"
+
+    if [ -n "$additive" ]; then
+        prune="false"
+    fi
+
+    info "Importing from ${C_CYAN}${remote}${C_RESET} ${C_DIM}(${kind})${C_RESET}"
+    sync_preview "$tree" "$prune"
+
+    if [ -z "$yes" ]; then
+        if [ -t 0 ]; then
+            printf '  Apply this to %s? [y/N] ' "$CLAUDE_DIR"
+            read -r reply || reply=""
+            case "$reply" in
+                y|Y|yes|YES|o|O|oui) ;;
+                *) rm -rf "$tmp"; info "Aborted — nothing was changed"; return 0 ;;
+            esac
+        else
+            rm -rf "$tmp"
+            die "not a terminal — re-run with --yes to apply without confirming"
+        fi
+    fi
+
+    sync_backup_claude
+    sync_apply "$tree" "$prune"
+    sync_reattach_ccs_hooks
+    if [ -n "$with_ccs" ]; then
+        sync_merge_ccs_config "$tree"
+    fi
+    rm -rf "$tmp"
+
+    info "Imported into $CLAUDE_DIR"
+    if [ -n "${SYNC_LAST_BACKUP:-}" ]; then
+        printf '    Previous state kept in %s\n' "$SYNC_LAST_BACKUP"
+    fi
+    if [ -n "$adopt" ]; then
+        config_set "_sync" "remote" "$remote"
+        config_set "_sync" "kind" "$kind"
+        SYNC_REMOTE="$remote"
+        SYNC_KIND="$kind"
+        sync_clone
+        info "Adopted $remote as your sync remote"
+    fi
+}
+
+cmd_sync_status() {
+    load_sync_cfg
+    printf '\n'
+    if [ -z "$SYNC_REMOTE" ]; then
+        printf '  %sSync:%s       not configured\n' "${C_BOLD}" "${C_RESET}"
+        printf '    Set it up with %sccs sync init --gist-new%s (or --repo-new <name>)\n\n' \
+            "${C_BOLD}" "${C_RESET}"
+        return 0
+    fi
+
+    local last mode scope
+    if [ "$SYNC_PRUNE" = "false" ]; then mode="additive"; else mode="mirror"; fi
+    if [ "${SYNC_INCLUDE_CCS:-}" = "true" ]; then
+        scope="Claude Code config + ccs config (keys stripped)"
+    else
+        scope="Claude Code config"
+    fi
+    last=$(sed -n 's/^LAST_SYNC=//p' "$SYNC_STATE_FILE" 2>/dev/null | head -1) || last=""
+    if is_uint "$last"; then
+        # -r is BSD, -d @epoch is GNU; falling back to the raw epoch is fine
+        last=$(date -r "$last" '+%Y-%m-%d %H:%M' 2>/dev/null \
+            || date -d "@$last" '+%Y-%m-%d %H:%M' 2>/dev/null \
+            || printf '%s' "$last")
+    else
+        last="never"
+    fi
+
+    printf '  %sRemote:%s     %s\n' "${C_BOLD}" "${C_RESET}" "$SYNC_REMOTE"
+    printf '  %sStorage:%s    %s\n' "${C_BOLD}" "${C_RESET}" "$SYNC_KIND"
+    printf '  %sScope:%s      %s\n' "${C_BOLD}" "${C_RESET}" "$scope"
+    printf '  %sOn pull:%s    %s\n' "${C_BOLD}" "${C_RESET}" "$mode"
+    printf '  %sAuto:%s       launch=%s hooks=%s\n' "${C_BOLD}" "${C_RESET}" \
+        "${SYNC_AUTO_LAUNCH:-false}" "${SYNC_AUTO_HOOKS:-false}"
+    printf '  %sLast sync:%s  %s\n' "${C_BOLD}" "${C_RESET}" "$last"
+
+    if have_git && [ -d "${SYNC_DIR}/.git" ]; then
+        # Staging is what makes this answer real: it shows exactly what a push
+        # would send. The working copy is ccs scratch space, so this is safe.
+        local pending
+        if sync_stage; then
+            sync_git add -A >/dev/null 2>&1 || true
+            pending=$(sync_git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+            if [ "${pending:-0}" -gt 0 ]; then
+                printf '  %sPending:%s    %s file(s) differ from the remote\n' \
+                    "${C_BOLD}" "${C_RESET}" "$pending"
+                printf '    Push them with %sccs sync push%s\n' "${C_BOLD}" "${C_RESET}"
+            else
+                printf '  %sPending:%s    %snothing to push%s\n' \
+                    "${C_BOLD}" "${C_RESET}" "${C_DIM}" "${C_RESET}"
+            fi
+        else
+            printf '  %sPending:%s    %snothing to back up in %s yet%s\n' \
+                "${C_BOLD}" "${C_RESET}" "${C_DIM}" "$CLAUDE_DIR" "${C_RESET}"
+        fi
+    fi
+    printf '\n'
+}
+
+cmd_sync_auto() {
+    local action="${1:-}"
+    load_sync_cfg
+    case "$action" in
+        on)
+            sync_require_remote
+            config_set "_sync" "auto_launch" "true"
+            info "Auto sync on — every 'ccs' launch syncs first (${SYNC_TIMEOUT}s budget, never blocking)"
+            ;;
+        off)
+            config_set "_sync" "auto_launch" "false"
+            info "Auto sync off — 'ccs sync push' / 'ccs sync pull' still work"
+            ;;
+        *) die "Usage: ccs sync auto on|off" ;;
+    esac
+}
+
+write_sync_hook_scripts() {
+    local ccs_bin script
+    ccs_bin="${SCRIPT_DIR}/$(basename "$0")"
+    mkdir -p "$HOOKS_DIR"
+    for script in pull push; do
+        {
+            printf '#!/bin/sh\n'
+            printf '# Generated by ccs (claude-code-switch) — do not edit, re-run: ccs sync hooks on\n'
+            printf 'CCS_BIN="%s"\n' "$ccs_bin"
+            printf 'CCS_SYNC_ACTION="%s"\n' "$script"
+            cat <<'HOOK'
+set -eu
+[ -x "$CCS_BIN" ] || CCS_BIN=$(command -v ccs 2>/dev/null) || exit 0
+CCS_SYNC_BATCH=1 "$CCS_BIN" sync "$CCS_SYNC_ACTION" >/dev/null 2>&1 || true
+exit 0
+HOOK
+        } > "${HOOKS_DIR}/sync-${script}.sh"
+        chmod +x "${HOOKS_DIR}/sync-${script}.sh"
+    done
+}
+
+sync_hooks_on() {
+    load_sync_cfg
+    sync_require_remote
+    settings_prepare
+    write_sync_hook_scripts
+    settings_detach_hooks "$CCS_HOOK_MARKER" SessionStart SessionEnd
+    settings_attach_hook SessionStart "${HOOKS_DIR}/sync-pull.sh"
+    settings_attach_hook SessionEnd "${HOOKS_DIR}/sync-push.sh"
+    config_set "_sync" "auto_hooks" "true"
+    info "Session hooks installed — pull when a session starts, push when it ends"
+    printf '    Remove them with %sccs sync hooks off%s\n' "${C_BOLD}" "${C_RESET}"
+}
+
+sync_hooks_off() {
+    if [ -f "$CLAUDE_SETTINGS" ] && grep -qF "$CCS_HOOK_MARKER" "$CLAUDE_SETTINGS" 2>/dev/null; then
+        require_jq
+        settings_detach_hooks "$CCS_HOOK_MARKER" SessionStart SessionEnd
+    fi
+    # Only our own scripts — `notify` shares this directory
+    rm -f "${HOOKS_DIR}/sync-pull.sh" "${HOOKS_DIR}/sync-push.sh"
+    rmdir "$HOOKS_DIR" 2>/dev/null || true
+    config_set "_sync" "auto_hooks" "false"
+    info "Session hooks removed"
+}
+
+cmd_sync_hooks() {
+    case "${1:-}" in
+        on)  sync_hooks_on ;;
+        off) sync_hooks_off ;;
+        *)   die "Usage: ccs sync hooks on|off" ;;
+    esac
+}
+
+cmd_sync_off() {
+    load_sync_cfg
+    if [ "${SYNC_AUTO_HOOKS:-}" = "true" ]; then
+        sync_hooks_off
+    fi
+    config_set "_sync" "remote" ""
+    config_set "_sync" "auto_launch" "false"
+    rm -rf "$SYNC_DIR"
+    rm -f "$SYNC_STATE_FILE"
+    info "Sync disabled — $CLAUDE_DIR and $SYNC_BACKUP_DIR were left untouched"
+}
+
+# One full sync, used by the auto paths. Return 3 = skipped on a secret.
+sync_auto_once() {
+    local before after prune="true" tree
+    sync_ensure_worktree
+    sync_git reset --hard --quiet HEAD >/dev/null 2>&1 || true
+    sync_git clean -fdq >/dev/null 2>&1 || true
+    sync_stage || return 0
+    sync_scan_secrets "$SYNC_DIR" 2>/dev/null || return 3
+    sync_git add -A
+    if [ -n "$(sync_git status --porcelain)" ]; then
+        sync_git commit -q -m "ccs sync from $(uname -n 2>/dev/null || printf 'unknown')"
+    fi
+    before=$(sync_git rev-parse HEAD 2>/dev/null || printf '-')
+    sync_fetch_rebase || return 1
+    after=$(sync_git rev-parse HEAD 2>/dev/null || printf '-')
+    sync_push_remote || return 1
+    # Only rewrite ~/.claude when the remote actually brought something new
+    if [ "$before" != "$after" ]; then
+        if [ "$SYNC_PRUNE" = "false" ]; then
+            prune="false"
+        fi
+        tree=$(mktemp -d)
+        sync_materialize "$SYNC_DIR" "$tree" "$SYNC_KIND"
+        sync_rewrite_home "$tree" "$SYNC_HOME_TOKEN" "$HOME"
+        sync_backup_claude
+        sync_apply "$tree" "$prune"
+        sync_reattach_ccs_hooks
+        rm -rf "$tree"
+    fi
+    sync_write_state
+    return 0
+}
+
+# Run a command with a wall-clock budget. macOS ships no timeout(1), so this is
+# a plain background job plus a one-second-granularity watchdog.
+sync_run_bounded() {
+    local secs="$1" pid i=0 rc=0
+    shift
+    ( "$@" ) >/dev/null 2>&1 &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$((i + 1))
+        if [ "$i" -gt "$secs" ]; then
+            kill -TERM "$pid" 2>/dev/null || true
+            return 124
+        fi
+        sleep 1
+    done
+    wait "$pid" || rc=$?
+    return "$rc"
+}
+
+# Called from cmd_launch. Never fatal: a sync problem must not stop Claude Code.
+sync_auto_launch() {
+    local rc=0
+    load_sync_cfg
+    [ "${SYNC_AUTO_LAUNCH:-}" = "true" ] || return 0
+    [ -n "$SYNC_REMOTE" ] || return 0
+    if ! have_git; then
+        warn "auto sync is on but git is not installed — skipping"
+        return 0
+    fi
+    CCS_SYNC_BATCH=1
+    export CCS_SYNC_BATCH
+    sync_run_bounded "$SYNC_TIMEOUT" sync_auto_once || rc=$?
+    unset CCS_SYNC_BATCH
+    case "$rc" in
+        0) ;;
+        3) warn "config sync skipped — credentials spotted in your Claude Code config (see 'ccs sync push')" ;;
+        124)
+            warn "config sync timed out after ${SYNC_TIMEOUT}s — launching anyway"
+            rm -f "${SYNC_DIR}/.git/index.lock" 2>/dev/null || true
+            ;;
+        *) warn "config sync failed — launching anyway (run 'ccs sync push' to see why)" ;;
+    esac
+    return 0
+}
+
+cmd_sync() {
+    local sub="${1:-status}"
+    if [ $# -gt 0 ]; then shift; fi
+    case "$sub" in
+        init)   cmd_sync_init "$@" ;;
+        push)   cmd_sync_push "$@" ;;
+        pull)   cmd_sync_pull "$@" ;;
+        import) cmd_sync_import "$@" ;;
+        status) cmd_sync_status ;;
+        auto)   cmd_sync_auto "$@" ;;
+        hooks)  cmd_sync_hooks "$@" ;;
+        off)    cmd_sync_off ;;
+        *) die "Unknown sync subcommand '$sub'. Usage: ccs sync init|push|pull|import|status|auto|hooks|off" ;;
     esac
 }
 
@@ -1179,6 +2297,9 @@ main() {
             ;;
         notify)
             cmd_notify "$@"
+            ;;
+        sync)
+            cmd_sync "$@"
             ;;
         purge)
             cmd_purge

@@ -575,6 +575,352 @@ assert_eq "purge removes the whole dir" "false" \
     "$([ -d "$TEST_CONFIG_DIR/.claude-provider" ] && echo true || echo false)"
 teardown
 
+# --- Sync helpers ---------------------------------------------------------
+# The whole sync suite runs against a bare repo on disk reached over file://,
+# so it never touches the network and never needs gh. git identity is written
+# into the working copy by ccs itself, which is what makes this pass on a CI
+# runner with no global git config.
+
+CLAUDE_HOME=""
+SYNC_REMOTE_URL=""
+
+sync_setup() {
+    setup
+    CLAUDE_HOME="$TEST_CONFIG_DIR/.claude"
+    SYNC_REMOTE_URL="file://$TEST_CONFIG_DIR/remote.git"
+    git init --bare -q "$TEST_CONFIG_DIR/remote.git"
+}
+
+# A believable ~/.claude: some config worth keeping, and a pile of things that
+# must never leave the machine.
+make_claude_home() {
+    mkdir -p "$CLAUDE_HOME/skills/demo" "$CLAUDE_HOME/commands" \
+             "$CLAUDE_HOME/projects/p1" "$CLAUDE_HOME/plugins"
+    printf '# global rules\n' > "$CLAUDE_HOME/CLAUDE.md"
+    printf '{"model":"opus"}\n' > "$CLAUDE_HOME/settings.json"
+    printf 'name: demo\n' > "$CLAUDE_HOME/skills/demo/SKILL.md"
+    printf 'run it\n' > "$CLAUDE_HOME/commands/go.md"
+    printf '{"plugins":[]}\n' > "$CLAUDE_HOME/plugins/installed_plugins.json"
+    printf 'private transcript\n' > "$CLAUDE_HOME/projects/p1/session.jsonl"
+    printf 'private history\n' > "$CLAUDE_HOME/history.jsonl"
+    printf 'credentials\n' > "$CLAUDE_HOME/.credentials.json"
+    printf '{"local":true}\n' > "$CLAUDE_HOME/settings.local.json"
+}
+
+sync_init_repo() {
+    "$CCS" sync init --repo "$SYNC_REMOTE_URL" >/dev/null 2>&1
+}
+
+# Clone the remote and list what actually landed there
+remote_files() {
+    rm -rf "$TEST_CONFIG_DIR/verify"
+    git clone -q "$SYNC_REMOTE_URL" "$TEST_CONFIG_DIR/verify" 2>/dev/null
+    ( cd "$TEST_CONFIG_DIR/verify" && find . -path ./.git -prune -o -type f -print | sort )
+}
+
+# -- Reserved sections are not providers --
+printf '\033[1m[sync: reserved sections]\033[0m\n'
+setup
+out=$("$CCS" list)
+assert_not_contains "list hides the reserved _sync section" "_sync" "$out"
+assert_exit "use _sync is rejected" "1" "$CCS" use _sync
+out=$("$CCS" sync status)
+assert_contains "sync status reads [_sync]" "not configured" "$out"
+teardown
+
+# -- init + push: the allow-list is respected --
+printf '\033[1m[sync: push allow-list]\033[0m\n'
+sync_setup
+make_claude_home
+out=$(sync_init_repo && "$CCS" sync push 2>&1)
+assert_contains "push reports the backup" "Backed up" "$out"
+files=$(remote_files)
+assert_contains "remote has CLAUDE.md" "./CLAUDE.md" "$files"
+assert_contains "remote has settings.json" "./settings.json" "$files"
+assert_contains "remote has skills" "./skills/demo/SKILL.md" "$files"
+assert_contains "remote has commands" "./commands/go.md" "$files"
+assert_contains "remote has the plugin manifest" "./plugins/installed_plugins.json" "$files"
+assert_contains "remote carries a manifest" "./.ccs-sync" "$files"
+assert_not_contains "remote has no transcripts" "projects" "$files"
+assert_not_contains "remote has no history" "history.jsonl" "$files"
+assert_not_contains "remote has no credentials" "credentials" "$files"
+assert_not_contains "remote has no machine-local settings" "settings.local.json" "$files"
+out=$("$CCS" sync push 2>&1)
+assert_contains "a second push is a no-op" "Already up to date" "$out"
+teardown
+
+# -- Symlinked skills are materialised, not linked --
+printf '\033[1m[sync: symlinks]\033[0m\n'
+sync_setup
+make_claude_home
+mkdir -p "$TEST_CONFIG_DIR/external"
+printf 'linked skill\n' > "$TEST_CONFIG_DIR/external/SKILL.md"
+ln -s "$TEST_CONFIG_DIR/external" "$CLAUDE_HOME/skills/linked"
+sync_init_repo
+"$CCS" sync push >/dev/null 2>&1
+remote_files >/dev/null
+assert_eq "symlinked skill is copied by content" "linked skill" \
+    "$(cat "$TEST_CONFIG_DIR/verify/skills/linked/SKILL.md" 2>/dev/null)"
+assert_eq "and lands as a real file" "false" \
+    "$([ -L "$TEST_CONFIG_DIR/verify/skills/linked" ] && echo true || echo false)"
+teardown
+
+# -- settings.json is made portable, and ccs's own hooks stay home --
+printf '\033[1m[sync: portable settings.json]\033[0m\n'
+sync_setup
+make_claude_home
+"$CCS" notify on ghostty >/dev/null 2>&1
+printf '{"statusLine":{"command":"%s/bin/line"}}\n' "$TEST_CONFIG_DIR" > "$CLAUDE_HOME/settings.json"
+"$CCS" notify on ghostty >/dev/null 2>&1
+sync_init_repo
+"$CCS" sync push >/dev/null 2>&1
+remote_files >/dev/null
+remote_settings=$(cat "$TEST_CONFIG_DIR/verify/settings.json")
+assert_contains "remote settings.json uses the HOME placeholder" "__CCS_HOME__/bin/line" "$remote_settings"
+assert_not_contains "remote settings.json leaks no absolute HOME" "$TEST_CONFIG_DIR/bin" "$remote_settings"
+assert_not_contains "remote settings.json drops the ccs hooks" "notify-stop.sh" "$remote_settings"
+assert_exit "remote settings.json is valid JSON" "0" jq empty "$TEST_CONFIG_DIR/verify/settings.json"
+"$CCS" sync pull >/dev/null 2>&1
+local_settings=$(cat "$CLAUDE_HOME/settings.json")
+assert_contains "pull restores the real HOME" "$TEST_CONFIG_DIR/bin/line" "$local_settings"
+assert_not_contains "pull leaves no placeholder behind" "__CCS_HOME__" "$local_settings"
+assert_contains "pull re-attaches the local ccs hooks" "notify-stop.sh" "$local_settings"
+teardown
+
+# -- The secret scan blocks a push --
+printf '\033[1m[sync: secret scan]\033[0m\n'
+sync_setup
+make_claude_home
+sync_init_repo
+# Assembled at runtime so the literal never sits in this file
+printf 'key: %s%s\n' 'sk-ant-' 'api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAA' \
+    > "$CLAUDE_HOME/skills/demo/leak.md"
+assert_exit "push refuses a credential" "1" "$CCS" sync push
+err=$("$CCS" sync push 2>&1 >/dev/null || true)
+assert_contains "the offending file is named" "leak.md" "$err"
+assert_exit "push --force overrides the scan" "0" "$CCS" sync push --force
+teardown
+
+# -- Restore: mirror by default, additive on request --
+printf '\033[1m[sync: pull mirror vs additive]\033[0m\n'
+sync_setup
+make_claude_home
+sync_init_repo
+"$CCS" sync push >/dev/null 2>&1
+mkdir -p "$CLAUDE_HOME/skills/only-here"
+printf 'local only\n' > "$CLAUDE_HOME/skills/only-here/SKILL.md"
+printf 'edited locally\n' > "$CLAUDE_HOME/CLAUDE.md"
+out=$("$CCS" sync pull --dry-run 2>&1)
+assert_contains "dry-run flags the divergence" "skills" "$out"
+assert_contains "dry-run says nothing was touched" "was not touched" "$out"
+assert_eq "dry-run really changed nothing" "edited locally" "$(cat "$CLAUDE_HOME/CLAUDE.md")"
+"$CCS" sync pull >/dev/null 2>&1
+assert_eq "mirror restores the remote file" "# global rules" "$(cat "$CLAUDE_HOME/CLAUDE.md")"
+assert_eq "mirror drops what the remote does not have" "false" \
+    "$([ -e "$CLAUDE_HOME/skills/only-here" ] && echo true || echo false)"
+backup=$(find "$TEST_CONFIG_DIR/.claude-provider/sync-backup" -mindepth 1 -maxdepth 1 -type d | head -1)
+assert_eq "pull snapshots ~/.claude first" "edited locally" \
+    "$(cat "$backup/CLAUDE.md" 2>/dev/null)"
+assert_eq "the snapshot keeps the pruned skill" "local only" \
+    "$(cat "$backup/skills/only-here/SKILL.md" 2>/dev/null)"
+mkdir -p "$CLAUDE_HOME/skills/kept"
+printf 'keep me\n' > "$CLAUDE_HOME/skills/kept/SKILL.md"
+"$CCS" sync pull --additive >/dev/null 2>&1
+assert_eq "additive keeps local-only files" "keep me" \
+    "$(cat "$CLAUDE_HOME/skills/kept/SKILL.md" 2>/dev/null)"
+teardown
+
+# -- A gist stores a flattened tree, and restores it nested --
+printf '\033[1m[sync: gist flattening]\033[0m\n'
+sync_setup
+make_claude_home
+"$CCS" sync init --gist "$SYNC_REMOTE_URL" >/dev/null 2>&1
+out=$("$CCS" sync status)
+assert_contains "gist storage is recorded" "gist" "$out"
+"$CCS" sync push >/dev/null 2>&1
+files=$(remote_files)
+assert_contains "gist encodes nested paths" "./skills%2Fdemo%2FSKILL.md" "$files"
+assert_contains "gist keeps top-level files as they are" "./CLAUDE.md" "$files"
+rm -rf "$CLAUDE_HOME/skills" "$CLAUDE_HOME/commands"
+"$CCS" sync pull >/dev/null 2>&1
+assert_eq "gist pull rebuilds the tree" "name: demo" \
+    "$(cat "$CLAUDE_HOME/skills/demo/SKILL.md" 2>/dev/null)"
+assert_eq "no encoded name survives the pull" "false" \
+    "$([ -e "$CLAUDE_HOME/skills%2Fdemo%2FSKILL.md" ] && echo true || echo false)"
+teardown
+
+# -- include_ccs strips keys on the way out and never clobbers one coming in --
+printf '\033[1m[sync: ccs config]\033[0m\n'
+sync_setup
+make_claude_home
+set_all_keys "test-key-123"
+set_key _sync include_ccs true
+sync_init_repo
+"$CCS" sync push >/dev/null 2>&1
+remote_files >/dev/null
+remote_cfg=$(cat "$TEST_CONFIG_DIR/verify/ccs/config")
+assert_contains "the ccs config is published" "[zai]" "$remote_cfg"
+assert_not_contains "with no API key in it" "test-key-123" "$remote_cfg"
+assert_contains "keys are blanked, not dropped" "api_key=" "$remote_cfg"
+assert_not_contains "and without the machine's own [_sync]" "remote=file://" "$remote_cfg"
+set_key zai model "glm-from-remote"
+"$CCS" sync push >/dev/null 2>&1
+set_key zai model "glm-local"
+"$CCS" sync pull >/dev/null 2>&1
+cfg=$(cat "$TEST_CONFIG_DIR/.claude-provider/config")
+assert_contains "pull merges the remote model" "model=glm-from-remote" "$cfg"
+assert_contains "pull keeps the local API key" "api_key=test-key-123" "$cfg"
+assert_contains "pull does not adopt a remote sync target" "remote=$TEST_CONFIG_DIR/remote.git" \
+    "$(sed -n 's|^remote=file://|remote=|p' "$TEST_CONFIG_DIR/.claude-provider/config")"
+teardown
+
+# -- import brings someone else's config in, without adopting their remote --
+printf '\033[1m[sync: import]\033[0m\n'
+sync_setup
+make_claude_home
+sync_init_repo
+"$CCS" sync push >/dev/null 2>&1
+rm -rf "$TEST_CONFIG_DIR/.claude-provider" "$CLAUDE_HOME"
+mkdir -p "$CLAUDE_HOME"
+"$CCS" help >/dev/null 2>&1
+assert_exit "import without --yes on a pipe is refused" "1" "$CCS" sync import "$SYNC_REMOTE_URL"
+out=$("$CCS" sync import "$SYNC_REMOTE_URL" --yes 2>&1)
+assert_contains "import reports where it read from" "Importing from" "$out"
+assert_eq "import restores CLAUDE.md" "# global rules" "$(cat "$CLAUDE_HOME/CLAUDE.md" 2>/dev/null)"
+assert_eq "import restores skills" "name: demo" "$(cat "$CLAUDE_HOME/skills/demo/SKILL.md" 2>/dev/null)"
+assert_eq "import brings no transcripts" "false" \
+    "$([ -e "$CLAUDE_HOME/projects" ] && echo true || echo false)"
+out=$("$CCS" sync status)
+assert_contains "import does not adopt the remote" "not configured" "$out"
+"$CCS" sync import "$SYNC_REMOTE_URL" --yes --adopt >/dev/null 2>&1
+out=$("$CCS" sync status)
+assert_contains "--adopt does configure it" "remote.git" "$out"
+teardown
+
+# -- Session hooks live alongside the notify hooks --
+printf '\033[1m[sync: session hooks]\033[0m\n'
+sync_setup
+make_claude_home
+SETTINGS="$CLAUDE_HOME/settings.json"
+sync_init_repo
+"$CCS" notify on >/dev/null 2>&1
+"$CCS" sync hooks on >/dev/null 2>&1
+assert_eq "pull hook created" "true" \
+    "$([ -x "$TEST_CONFIG_DIR/.claude-provider/hooks/sync-pull.sh" ] && echo true || echo false)"
+assert_exit "settings.json stays valid JSON" "0" jq empty "$SETTINGS"
+assert_eq "SessionStart is hooked" "1" "$(jq '.hooks.SessionStart | length' "$SETTINGS")"
+assert_eq "SessionEnd is hooked" "1" "$(jq '.hooks.SessionEnd | length' "$SETTINGS")"
+assert_eq "notify's Stop hook is untouched" "1" "$(jq '.hooks.Stop | length' "$SETTINGS")"
+# The hook has to run silently — Claude Code reads hook stdout
+out=$(printf '{}' | "$TEST_CONFIG_DIR/.claude-provider/hooks/sync-push.sh" 2>&1)
+assert_eq "the SessionEnd hook prints nothing" "" "$out"
+assert_contains "and actually pushed" "./CLAUDE.md" "$(remote_files)"
+set_key _sync remote "file://$TEST_CONFIG_DIR/gone.git"
+out=$(printf '{}' | "$TEST_CONFIG_DIR/.claude-provider/hooks/sync-pull.sh" 2>&1)
+assert_eq "a hook against a dead remote stays silent" "" "$out"
+assert_eq "and leaves ~/.claude alone" "# global rules" "$(cat "$CLAUDE_HOME/CLAUDE.md")"
+set_key _sync remote "$SYNC_REMOTE_URL"
+"$CCS" sync hooks on >/dev/null 2>&1
+assert_eq "installing twice does not duplicate" "1" "$(jq '.hooks.SessionStart | length' "$SETTINGS")"
+"$CCS" notify off >/dev/null 2>&1
+assert_eq "notify off leaves the sync hooks alone" "1" "$(jq '.hooks.SessionStart | length' "$SETTINGS")"
+assert_eq "notify off still removes its own" "null" "$(jq -r '.hooks.Stop' "$SETTINGS")"
+assert_eq "notify off keeps the sync scripts" "true" \
+    "$([ -x "$TEST_CONFIG_DIR/.claude-provider/hooks/sync-pull.sh" ] && echo true || echo false)"
+"$CCS" sync hooks off >/dev/null 2>&1
+assert_eq "sync hooks off clears SessionStart" "null" "$(jq -r '.hooks.SessionStart' "$SETTINGS")"
+assert_eq "and removes the hooks dir once empty" "false" \
+    "$([ -d "$TEST_CONFIG_DIR/.claude-provider/hooks" ] && echo true || echo false)"
+teardown
+
+# -- purge detaches both hook families --
+printf '\033[1m[sync: purge detaches session hooks]\033[0m\n'
+sync_setup
+make_claude_home
+SETTINGS="$CLAUDE_HOME/settings.json"
+sync_init_repo
+"$CCS" notify on >/dev/null 2>&1
+"$CCS" sync hooks on >/dev/null 2>&1
+"$CCS" purge >/dev/null 2>&1
+assert_not_contains "purge removes every ccs hook reference" "claude-provider" "$(cat "$SETTINGS")"
+assert_exit "settings still valid JSON after purge" "0" jq empty "$SETTINGS"
+teardown
+
+# -- Auto sync never blocks a launch --
+printf '\033[1m[sync: auto never blocks the launch]\033[0m\n'
+sync_setup
+make_claude_home
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\necho CLAUDE_RAN\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+sync_init_repo
+"$CCS" sync auto on >/dev/null 2>&1
+set_all_keys "test-key-123"
+"$CCS" use zai >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>&1)
+assert_contains "a working auto sync still launches claude" "CLAUDE_RAN" "$out"
+files=$(remote_files)
+assert_contains "and the launch pushed the config" "./CLAUDE.md" "$files"
+# Now point at a remote that cannot answer
+set_key _sync remote "file://$TEST_CONFIG_DIR/gone.git"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>&1)
+assert_contains "an unreachable remote still launches claude" "CLAUDE_RAN" "$out"
+assert_contains "and says why" "config sync failed" "$out"
+"$CCS" sync auto off >/dev/null 2>&1
+rm -rf "$SHIM_DIR"
+teardown
+
+# -- sync off forgets the remote and touches nothing else --
+printf '\033[1m[sync: off]\033[0m\n'
+sync_setup
+make_claude_home
+sync_init_repo
+"$CCS" sync push >/dev/null 2>&1
+"$CCS" sync off >/dev/null 2>&1
+out=$("$CCS" sync status)
+assert_contains "off forgets the remote" "not configured" "$out"
+assert_eq "off leaves ~/.claude alone" "# global rules" "$(cat "$CLAUDE_HOME/CLAUDE.md")"
+assert_eq "off drops the working copy" "false" \
+    "$([ -d "$TEST_CONFIG_DIR/.claude-provider/sync" ] && echo true || echo false)"
+assert_exit "push without a remote explains itself" "1" "$CCS" sync push
+teardown
+
+# -- Bad input --
+printf '\033[1m[sync: bad input]\033[0m\n'
+sync_setup
+assert_exit "unknown subcommand rejected" "1" "$CCS" sync bogus
+assert_exit "unknown push flag rejected" "1" "$CCS" sync push --nope
+assert_exit "auto needs on or off" "1" "$CCS" sync auto maybe
+assert_exit "hooks needs on or off" "1" "$CCS" sync hooks maybe
+assert_exit "init needs a target" "1" "$CCS" sync init
+assert_exit "init rejects an unreachable remote" "1" "$CCS" sync init --repo "file://$TEST_CONFIG_DIR/nope.git"
+assert_exit "import needs a source" "1" "$CCS" sync import
+teardown
+
+# -- git is a soft dependency: absent, only sync stops working --
+printf '\033[1m[sync: git absent]\033[0m\n'
+sync_setup
+make_claude_home
+NOGIT_DIR=$(mktemp -d)
+for b in sh sed awk grep tar find mkdir mktemp date cat cp rm mv ls chmod rmdir \
+         head tail tr wc uname diff sort stat env dirname basename rev cut jq \
+         touch sleep kill expr; do
+    p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$NOGIT_DIR/$b"
+done
+assert_eq "the stub PATH really has no git" "false" \
+    "$([ -e "$NOGIT_DIR/git" ] && echo true || echo false)"
+err=$(PATH="$NOGIT_DIR" "$CCS" sync push 2>&1 || true)
+assert_contains "sync push says git is required" "git is required" "$err"
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\necho CLAUDE_RAN\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+set_all_keys "test-key-123"
+PATH="$NOGIT_DIR" "$CCS" use zai >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$NOGIT_DIR" "$CCS" launch 2>&1)
+assert_contains "the rest of ccs still works without git" "CLAUDE_RAN" "$out"
+rm -rf "$NOGIT_DIR" "$SHIM_DIR"
+teardown
+
 # -- Summary --
 TOTAL=$((PASS + FAIL))
 printf '\n\033[1m=== Results: %d/%d passed ===\033[0m\n' "$PASS" "$TOTAL"
