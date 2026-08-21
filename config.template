@@ -23,6 +23,9 @@
 provider=anthropic
 model=claude-sonnet-5
 auto_context=true
+# Keep the machine awake while claude runs — see `ccs caffeine`
+#   off | system (screen may sleep) | display (screen stays lit)
+caffeine=off
 
 # Config backup / sync — see `ccs sync`. Normally written by `ccs sync init`.
 # Sections starting with _ are reserved: they are never treated as providers.

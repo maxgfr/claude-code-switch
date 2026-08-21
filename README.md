@@ -12,6 +12,7 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 - **Default model**: configurable globally and per provider
 - **Right-sized context window**: detects each model's real window so auto-compact stops assuming 200k
 - **Config backup & sync**: push `~/.claude` to a gist or private repo, restore it on any machine
+- **Keep awake**: `ccs caffeine on` stops the machine sleeping mid-session, for exactly as long as claude runs
 - **Tiny footprint**: pure POSIX sh — no python, no node; `jq`, `llm-models`, `git` and `gh` are all optional, and each feature degrades instead of breaking when one is missing
 - **Zero interference**: switching provider never touches your shell, your dotfiles or your Claude Code config. Only `ccs notify` and `ccs sync` write to `~/.claude` — both explicit opt-in, both reversible, both backed up first
 - **Direct launch**: `ccs` starts Claude Code with the right env vars (scoped to that process)
@@ -79,6 +80,11 @@ ccs sync pull              # 3. …restore it anywhere else
 ccs [args...]               Launch claude with active provider (default)
 ccs <command> [arguments]
 
+LAUNCH FLAGS
+    --caffeine[=system|display] Keep the machine awake for this session only
+    --no-caffeine               Let it sleep for this session only
+                                (must come first; everything else goes to claude)
+
 COMMANDS
     use <provider> [model]      Switch to a provider (saves as default)
     list                        List configured providers
@@ -88,6 +94,7 @@ COMMANDS
     env                         Print export statements for current shell
     models [refresh|clear]      Show / refresh the context windows ccs will use
     notify on|off|status|test   Desktop notifications when Claude needs you
+    caffeine on|off|status      Keep the machine awake while claude runs
     sync <subcommand>           Back up ~/.claude to a gist or repo
     reset                       Clear active provider (back to vanilla claude)
     purge                       Remove all ccs data (~/.claude-provider/)
@@ -130,6 +137,7 @@ ccs models                            # See the context window ccs will use, per
 # Launch Claude Code
 ccs                                   # Launch with active provider
 ccs --print "hello world"             # Pass flags through to claude
+ccs --caffeine -p "long refactor"     # ...and don't let the machine sleep
 
 # Export to current shell
 eval "$(ccs env)"                     # Export env vars to current session
@@ -334,6 +342,46 @@ How it works:
 
 > **Note:** `ccs notify on` is one of the two exceptions to the zero-interference principle (the other is `ccs sync`): it edits `~/.claude/settings.json` (hooks + `preferredNotifChannel`). It is explicit opt-in, backs up your settings to `~/.claude-provider/settings-backup.json`, and `ccs notify off` restores the previous state. Hook scripts live in `~/.claude-provider/hooks/`.
 
+## Keep the machine awake
+
+A long agent run and a laptop that sleeps at 15 minutes do not mix. `ccs caffeine on` holds an OS
+sleep assertion for **exactly** as long as the claude process lives, then lets normal sleep
+behaviour return on its own — whether the session exits, crashes or you Ctrl-C it. No permanent
+system setting is changed.
+
+```sh
+ccs caffeine on              # Every session from now on
+ccs caffeine on display      # ...and keep the screen lit too
+ccs caffeine status          # Show the state and the exact wrapper
+ccs caffeine off             # Back to normal sleep
+
+ccs --caffeine               # Just this session
+ccs --caffeine=display -p "long refactor"
+ccs --no-caffeine            # Let this one sleep, whatever the config says
+```
+
+Two modes, because keeping the screen lit all night is rarely what you want:
+
+| Mode | macOS | Linux (systemd) | Effect |
+|---|---|---|---|
+| `system` (default) | `caffeinate -ims` | `--what=sleep` | Machine stays awake, screen may sleep |
+| `display` | `caffeinate -dims` | `--what=sleep:idle` | Screen stays lit too |
+
+Linux falls back to `gnome-session-inhibit` when `systemd-inhibit` is absent. On any other OS `ccs`
+warns once and launches normally — a missing keep-awake tool is never fatal.
+
+Two things worth knowing:
+
+- A sleep assertion is a running process, not an environment variable, so `eval "$(ccs env)"`
+  cannot carry it. Launch through `ccs` to get it (`ccs env` says so on stderr when caffeine is on).
+- It prevents sleep, not a power cut. Commit your progress on long tasks.
+
+The state lives in `[_defaults] caffeine=` in `~/.claude-provider/config` — nothing outside
+`~/.claude-provider/` is touched, so this is *not* an exception to the zero-interference principle.
+
+Not using `ccs`? [claudfeine](https://github.com/maxgfr/claudfeine) is the same idea as a standalone
+wrapper around `claude` (and `codex`).
+
 ## Config backup & sync
 
 Reinstalling Claude Code means rebuilding your global `CLAUDE.md`, your settings, your skills and
@@ -452,6 +500,8 @@ ccs             → Claude Code with provider env vars (scoped to that process)
 `ccs` also **scrubs conflicting inherited vars** (`env -u`) before launching: a stale `ANTHROPIC_BASE_URL` or tier model left in your shell by a previous `eval "$(ccs env)"` for another provider can't leak into the launch. Likewise, `eval "$(ccs env)"` for native Anthropic unsets the third-party tier vars it may have exported before.
 
 If **no provider is configured at all** (no active provider, no API key in the defaults), `ccs` warns and launches vanilla `claude` instead of failing.
+
+With `ccs caffeine` on, the keep-awake tool is spliced into that same `exec`, between `env` and `claude` — `exec env ... caffeinate -ims claude ...` — so the sleep assertion is scoped to the claude process exactly like the env vars are, and claude's exit status still reaches your shell.
 
 | Variable                      | When                                                 |
 |-------------------------------|------------------------------------------------------|

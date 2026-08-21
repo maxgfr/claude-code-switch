@@ -4,7 +4,7 @@
 
 ## Project overview
 
-`ccs` (Claude Code Switch) is a minimal POSIX sh script for switching Claude Code between AI providers, and for backing up the `~/.claude` config that makes a good install. It is a **sidecar tool** — `claude` always works as-is. Provider switching only injects env vars into the child process spawned when running `ccs` (defaults to launch); the two commands that do write to `~/.claude` are listed under Core principle below.
+`ccs` (Claude Code Switch) is a minimal POSIX sh script for switching Claude Code between AI providers, for backing up the `~/.claude` config that makes a good install, and for keeping the machine awake while a session runs. It is a **sidecar tool** — `claude` always works as-is. Provider switching only injects env vars into the child process spawned when running `ccs` (defaults to launch); the two commands that do write to `~/.claude` are listed under Core principle below.
 
 ## Core principle
 
@@ -19,7 +19,7 @@
 
 ## Architecture
 
-- **Single script**: `ccs` (~2250 lines of POSIX sh)
+- **Single script**: `ccs` (~2500 lines of POSIX sh)
 - **Config**: INI format at `~/.claude-provider/config`, parsed with shell builtins (`while read` + `case`)
 - **State**: `~/.claude-provider/active` stores current provider/model (removed by `ccs reset`)
 - **Model cache**: `~/.claude-provider/models-cache` stores resolved context windows (survives
@@ -75,7 +75,44 @@ test.sh             # Integration test suite (run in CI, hermetic: stubs llm-mod
 
 ## Commands
 
-`ccs use|list|status|config|launch|env|models|notify|sync|reset|purge|help|version`
+`ccs use|list|status|config|launch|env|models|notify|caffeine|sync|reset|purge|help|version`
+
+Plus two launch flags consumed in `main()` before the generic `-*` passthrough: `--caffeine[=mode]`
+and `--no-caffeine`.
+
+## Keep awake (`ccs caffeine`)
+
+- The whole feature is **one command prefix** spliced into `cmd_launch`'s `exec`, between `env` and
+  `claude`. `exec` is what makes it correct: the assertion is scoped to the claude process, it is
+  released on exit/crash/signal, and claude's exit status still reaches the shell (verified:
+  `caffeinate -i sh -c 'exit 3'` → 3)
+- `CAFFEINE_CMD` is spliced **unquoted**, same trick as `$ctx_env $out_env`. That is only safe
+  because every word in it is space-free by construction — `--why=ccs-session`, never
+  `--why="ccs session"`. Any future flag with a spaced value would silently word-split; put it in
+  the `--k=v` form or don't add it
+- Resolution happens **before `load_state`** in `cmd_launch`, so `launch_vanilla` is caffeinated
+  too: keeping the machine awake is about the machine, not about which model answers
+- `caffeine_mode` calls `parse_config` itself. It has to: `load_state` returns early without ever
+  parsing the config whenever `~/.claude-provider/active` exists, which would make a configured
+  `caffeine=` read as empty. There is a test for exactly this
+- **Never fatal.** No `caffeinate` / `systemd-inhibit` / `gnome-session-inhibit`, or an OS ccs
+  doesn't know → `warn` once and launch anyway. Same contract as `llm-models` being absent
+- Two modes because keeping the display lit all night is rarely wanted: `system` (default,
+  `caffeinate -ims` / `--what=sleep`) and `display` (`-dims` / `--what=sleep:idle`)
+- State is `[_defaults] caffeine=` — a single key, not a new `_` section, since it sits next to
+  `auto_context` as another launch-shaping default. Absent key = off, so old configs need no
+  migration. With `include_ccs=true` it travels through `sync_merge_ccs_config` like any other
+  non-`[_sync]` key, which is intended
+- **This is not a third exception to the zero-interference principle**: it writes only to
+  `~/.claude-provider/config` and never touches `~/.claude`
+- `ccs env` cannot carry it — a sleep assertion is a process, not a variable. It prints a note on
+  **stderr** so `eval "$(ccs env)"` keeps a clean stdout
+- Ported from [claudfeine](https://github.com/maxgfr/claudfeine), which stays the standalone
+  wrapper for people not using ccs. Windows is out of scope here (ccs is POSIX sh)
+- `test.sh` stubs the tool under **both** `caffeinate` and `systemd-inhibit` so the same assertions
+  run on the macOS and ubuntu runners, and shadows `uname` to reach the unsupported-OS branch.
+  Because every flag is `-x` or `--k=v`, the stub's `while case $1 in -*) shift` loop lands exactly
+  on `claude`
 
 ## Config sync (`ccs sync`)
 

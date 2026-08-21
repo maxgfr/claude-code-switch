@@ -17,6 +17,12 @@ CLAUDE_DIR="${HOME}/.claude"
 CLAUDE_SETTINGS="${CLAUDE_DIR}/settings.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# --- Keep-awake state (see `ccs caffeine`) ---
+# Resolved per launch, never persisted: CAFFEINE_CMD holds the wrapper command
+# as space-free words, spliced unquoted into the exec in cmd_launch.
+CAFFEINE_CMD=""                               # e.g. "caffeinate -ims", empty = no wrapper
+CAFFEINE_OVERRIDE=""                          # --caffeine / --no-caffeine, beats the config
+
 # --- Sync constants ---
 SYNC_DIR="${CONFIG_DIR}/sync"                 # git working copy mirroring the remote
 SYNC_BACKUP_DIR="${CONFIG_DIR}/sync-backup"   # ~/.claude snapshots, one per apply
@@ -206,6 +212,7 @@ require_config() {
 provider=anthropic
 model=claude-sonnet-5
 auto_context=true
+caffeine=off
 
 [_sync]
 remote=
@@ -630,6 +637,8 @@ cmd_status() {
         printf '  %sContext:%s   %sunknown (%s)%s\n' "${C_BOLD}" "${C_RESET}" \
             "${C_DIM}" "$CTX_SOURCE" "${C_RESET}"
     fi
+    # Caffeine belongs here, unlike notify/sync: it changes what a launch does.
+    caffeine_line
     printf "\n"
 }
 
@@ -680,19 +689,153 @@ write_defaults() {
 }
 
 
+# --- Keep awake ---
+# `ccs caffeine` holds an OS sleep assertion for exactly as long as the claude
+# process lives. It changes no permanent system setting and writes nothing
+# outside ~/.claude-provider/config: the whole feature is a command prefix
+# inserted between `env` and `claude` in cmd_launch.
+
+# The effective mode: --caffeine/--no-caffeine first, then [_defaults] caffeine=.
+# parse_config runs here because load_state returns early — without ever parsing
+# the config — whenever an active state file exists, which would make a
+# configured caffeine= read as empty.
+caffeine_mode() {
+    local mode="$CAFFEINE_OVERRIDE"
+    if [ -z "$mode" ]; then
+        parse_config || true
+        mode=$(get_cfg "_defaults" "caffeine")
+    fi
+    case "$mode" in
+        on|true|system) printf 'system' ;;
+        display)        printf 'display' ;;
+        ""|off|false)   printf 'off' ;;
+        *)
+            warn "unknown caffeine mode '$mode' — treating it as off (use system or display)"
+            printf 'off'
+            ;;
+    esac
+}
+
+# Resolve $mode into CAFFEINE_CMD for this OS.
+# Returns 1 only when a mode was asked for and no keep-awake tool exists — the
+# caller warns and launches anyway, never dies.
+caffeine_resolve() {
+    local mode="$1" what
+    CAFFEINE_CMD=""
+    if [ "$mode" = "off" ]; then
+        return 0
+    fi
+
+    # Every word below is space-free on purpose (--why=ccs-session, not
+    # --why="ccs session"): CAFFEINE_CMD is spliced unquoted into the exec.
+    case "$(uname -s 2>/dev/null || printf 'unknown')" in
+        Darwin)
+            if command -v caffeinate >/dev/null 2>&1; then
+                # -i idle system, -m disk, -s system sleep; -d also holds the display
+                if [ "$mode" = "display" ]; then
+                    CAFFEINE_CMD="caffeinate -dims"
+                else
+                    CAFFEINE_CMD="caffeinate -ims"
+                fi
+            fi
+            ;;
+        Linux)
+            if command -v systemd-inhibit >/dev/null 2>&1; then
+                # sleep blocks suspend; idle also blocks the idle timer that
+                # blanks the screen, which is the display mode's whole point
+                what="sleep"
+                if [ "$mode" = "display" ]; then what="sleep:idle"; fi
+                CAFFEINE_CMD="systemd-inhibit --what=$what --who=ccs --why=ccs-session --mode=block"
+            elif command -v gnome-session-inhibit >/dev/null 2>&1; then
+                what="suspend"
+                if [ "$mode" = "display" ]; then what="suspend:idle"; fi
+                CAFFEINE_CMD="gnome-session-inhibit --inhibit $what --reason ccs-session"
+            fi
+            ;;
+    esac
+
+    [ -n "$CAFFEINE_CMD" ]
+}
+
+# The one-line state, shared by `ccs status` and `ccs caffeine status`
+caffeine_line() {
+    local mode
+    mode=$(caffeine_mode)
+    if [ "$mode" = "off" ]; then
+        printf '  %sCaffeine:%s  off\n' "${C_BOLD}" "${C_RESET}"
+        return 0
+    fi
+    if caffeine_resolve "$mode"; then
+        printf '  %sCaffeine:%s  on %s(%s — %s)%s\n' "${C_BOLD}" "${C_RESET}" \
+            "${C_DIM}" "$mode" "$CAFFEINE_CMD" "${C_RESET}"
+    else
+        printf '  %sCaffeine:%s  on %s(%s — no keep-awake tool on this system)%s\n' \
+            "${C_BOLD}" "${C_RESET}" "${C_DIM}" "$mode" "${C_RESET}"
+    fi
+}
+
+caffeine_on() {
+    local mode="${1:-system}"
+    case "$mode" in
+        system|display) ;;
+        *) die "Unknown caffeine mode '$mode'. Usage: ccs caffeine on [system|display]" ;;
+    esac
+    config_set "_defaults" "caffeine" "$mode"
+    if [ "$mode" = "display" ]; then
+        info "Caffeine on (display) — the machine and the screen stay awake while claude runs"
+    else
+        info "Caffeine on (system) — the machine stays awake while claude runs, the screen may sleep"
+    fi
+    if caffeine_resolve "$mode"; then
+        printf '    Wrapper: %s%s%s\n' "${C_BOLD}" "$CAFFEINE_CMD" "${C_RESET}"
+    else
+        warn "no keep-awake tool found on this system — sessions will launch, just not caffeinated"
+    fi
+}
+
+caffeine_off() {
+    config_set "_defaults" "caffeine" "off"
+    info "Caffeine off — claude sessions no longer keep the machine awake"
+}
+
+caffeine_status() {
+    printf '\n'
+    caffeine_line
+    printf '\n'
+}
+
+cmd_caffeine() {
+    local sub="${1:-status}"
+    if [ $# -gt 0 ]; then shift; fi
+    case "$sub" in
+        on)     caffeine_on "$@" ;;
+        off)    caffeine_off ;;
+        status) caffeine_status ;;
+        *)      die "Unknown caffeine subcommand '$sub'. Usage: ccs caffeine on|off|status" ;;
+    esac
+}
+
 # No provider usable — run claude untouched instead of failing
 launch_vanilla() {
     if ! command -v claude >/dev/null 2>&1; then
         die "claude command not found. Install Claude Code first."
     fi
     warn "no provider configured — launching vanilla claude (run 'ccs use <provider>' to switch)"
-    exec claude "$@"
+    # Keep awake still applies: it is about the machine, not about the provider.
+    # shellcheck disable=SC2086  # intentional: empty means "no wrapper"
+    exec $CAFFEINE_CMD claude "$@"
 }
 
 cmd_launch() {
     # Config sync runs before anything provider-related: it is about ~/.claude,
     # not about which model answers. It can never stop the launch.
     sync_auto_launch
+
+    # Resolved before load_state so the vanilla fallback below is caffeinated
+    # too — a missing tool warns and launches anyway, it is never fatal.
+    if ! caffeine_resolve "$(caffeine_mode)"; then
+        warn "no keep-awake tool found on this system — the session will not stay awake"
+    fi
 
     # Active state first, then [_defaults]; neither usable means vanilla claude
     if ! load_state; then
@@ -706,8 +849,15 @@ cmd_launch() {
 
     load_limits "$ACTIVE_PROVIDER" "$ACTIVE_MODEL" "$ACTIVE_BASE_URL"
 
+    local detail=""
     if [ -n "$CTX_TOKENS" ]; then
-        info "Launching claude with ${C_BOLD}${ACTIVE_PROVIDER}${C_RESET} / ${C_CYAN}${ACTIVE_MODEL}${C_RESET} ${C_DIM}($(fmt_tokens "$CTX_TOKENS") context)${C_RESET}"
+        detail="$(fmt_tokens "$CTX_TOKENS") context"
+    fi
+    if [ -n "$CAFFEINE_CMD" ]; then
+        detail="${detail:+$detail, }caffeinated"
+    fi
+    if [ -n "$detail" ]; then
+        info "Launching claude with ${C_BOLD}${ACTIVE_PROVIDER}${C_RESET} / ${C_CYAN}${ACTIVE_MODEL}${C_RESET} ${C_DIM}(${detail})${C_RESET}"
     else
         info "Launching claude with ${C_BOLD}${ACTIVE_PROVIDER}${C_RESET} / ${C_CYAN}${ACTIVE_MODEL}${C_RESET}"
     fi
@@ -743,11 +893,12 @@ cmd_launch() {
             CLAUDE_CODE_SUBAGENT_MODEL="$ACTIVE_SONNET" \
             ANTHROPIC_SMALL_FAST_MODEL="$ACTIVE_HAIKU" \
             $ctx_env $out_env \
-            claude "$@"
+            $CAFFEINE_CMD claude "$@"
     else
         # Native Anthropic — use ANTHROPIC_API_KEY, no BASE_URL override.
         # Claude Code ignores CLAUDE_CODE_MAX_CONTEXT_TOKENS for claude-* ids
         # anyway, so the native setup is left entirely alone.
+        # shellcheck disable=SC2086  # intentional: empty means "no wrapper"
         exec env \
             -u ANTHROPIC_BASE_URL \
             -u ANTHROPIC_AUTH_TOKEN \
@@ -760,7 +911,7 @@ cmd_launch() {
             -u CLAUDE_CODE_MAX_OUTPUT_TOKENS \
             ANTHROPIC_API_KEY="$ACTIVE_API_KEY" \
             ANTHROPIC_MODEL="$ACTIVE_MODEL" \
-            claude "$@"
+            $CAFFEINE_CMD claude "$@"
     fi
 }
 
@@ -810,6 +961,13 @@ cmd_env() {
         printf 'unset CLAUDE_CODE_MAX_OUTPUT_TOKENS 2>/dev/null || true\n'
     fi
     printf "export ANTHROPIC_MODEL='%s'\n" "$ACTIVE_MODEL"
+
+    # A sleep assertion is a live process, not an env var — `ccs env` cannot
+    # carry it. Say so on stderr so `eval "$(ccs env)"` stays clean.
+    if [ "$(caffeine_mode)" != "off" ]; then
+        printf '%sccs caffeine is on, but env vars cannot keep a machine awake — launch with %sccs%s%s to get it.%s\n' \
+            "${C_DIM}" "${C_RESET}${C_BOLD}" "${C_RESET}" "${C_DIM}" "${C_RESET}" >&2
+    fi
 }
 
 cmd_help() {
@@ -823,6 +981,11 @@ ${C_BOLD}USAGE${C_RESET}
                                 (vanilla claude if nothing is configured)
     ccs <command> [arguments]
 
+${C_BOLD}LAUNCH FLAGS${C_RESET}
+    --caffeine[=system|display] Keep the machine awake for this session only
+    --no-caffeine               Let it sleep for this session only
+                                (must come first; everything else goes to claude)
+
 ${C_BOLD}COMMANDS${C_RESET}
     use <provider> [model]      Switch to a provider (saves as default)
     list                        List configured providers
@@ -832,6 +995,7 @@ ${C_BOLD}COMMANDS${C_RESET}
     env                         Print export statements for current shell
     models [refresh|clear]      Show / refresh the context windows ccs will use
     notify on|off|status|test   Desktop notifications when Claude needs you
+    caffeine on|off|status      Keep the machine awake while claude runs
     sync <subcommand>           Back up ~/.claude to a gist or repo (see below)
     reset                       Clear active provider (back to vanilla claude)
     purge                       Remove all ccs data (~/.claude-provider/)
@@ -860,6 +1024,8 @@ ${C_BOLD}EXAMPLES${C_RESET}
     ccs models                         Show the context window per model tier
     ccs notify on                      Notify on task end + questions (needs jq)
     ccs notify on iterm2               Pin the terminal instead of auto-detect
+    ccs caffeine on                    No sleep while claude runs, from now on
+    ccs --caffeine -p "long task"      No sleep for this one session
     ccs sync init --gist-new           Create a secret gist for your config
     ccs sync push                      Back it up
     ccs sync import <gist-url>         Rebuild a good install elsewhere
@@ -875,6 +1041,20 @@ ${C_BOLD}CONTEXT WINDOW${C_RESET}
 
     Pin a window by hand with context_tokens= in the provider's config
     section; auto_context=false in [_defaults] turns the whole thing off.
+
+${C_BOLD}KEEP AWAKE${C_RESET}
+    'ccs caffeine on' holds an OS sleep assertion for exactly as long as the
+    claude process lives, so an overnight run does not die with the lid. It
+    changes no permanent system setting and releases on exit, crash or Ctrl-C.
+
+        system    (default) the machine stays awake, the screen may sleep
+        display   the screen stays lit too — 'ccs caffeine on display'
+
+    macOS uses caffeinate, Linux systemd-inhibit (or gnome-session-inhibit).
+    On anything else ccs warns once and launches normally — never fatal.
+
+    A sleep assertion is a running process, not an environment variable, so
+    'eval "\$(ccs env)"' cannot carry it. Launch through 'ccs' to get it.
 
 ${C_BOLD}CONFIG SYNC${C_RESET}
     'ccs sync' backs up what makes a good Claude Code install — global
@@ -2251,6 +2431,18 @@ cmd_version() {
 main() {
     require_config
 
+    # --caffeine / --no-caffeine are consumed here, before the generic -*
+    # passthrough below, so they never reach claude. They must lead the command
+    # line; everything after the first non-caffeine word is claude's again.
+    while :; do
+        case "${1:-}" in
+            --caffeine)    CAFFEINE_OVERRIDE="system";           shift ;;
+            --caffeine=*)  CAFFEINE_OVERRIDE="${1#--caffeine=}"; shift ;;
+            --no-caffeine) CAFFEINE_OVERRIDE="off";              shift ;;
+            *) break ;;
+        esac
+    done
+
     # ccs's own flags first, then: no args or first arg starts with -
     # → launch (pass all args to claude)
     case "${1:-}" in
@@ -2297,6 +2489,9 @@ main() {
             ;;
         notify)
             cmd_notify "$@"
+            ;;
+        caffeine)
+            cmd_caffeine "$@"
             ;;
         sync)
             cmd_sync "$@"

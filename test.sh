@@ -52,7 +52,7 @@ assert_eq() {
 
 assert_contains() {
     local desc="$1" needle="$2" haystack="$3"
-    if printf '%s' "$haystack" | grep -qF "$needle"; then
+    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
         PASS=$((PASS + 1))
         printf '  \033[32mPASS\033[0m %s\n' "$desc"
     else
@@ -65,7 +65,7 @@ assert_contains() {
 
 assert_not_contains() {
     local desc="$1" needle="$2" haystack="$3"
-    if ! printf '%s' "$haystack" | grep -qF "$needle"; then
+    if ! printf '%s' "$haystack" | grep -qF -- "$needle"; then
         PASS=$((PASS + 1))
         printf '  \033[32mPASS\033[0m %s\n' "$desc"
     else
@@ -573,6 +573,148 @@ FAKE_LLM_MODELS="1000000 131072 zai/glm-5.1" "$CCS" use zai >/dev/null 2>&1
 "$CCS" purge >/dev/null 2>&1
 assert_eq "purge removes the whole dir" "false" \
     "$([ -d "$TEST_CONFIG_DIR/.claude-provider" ] && echo true || echo false)"
+teardown
+
+# --- Keep awake (ccs caffeine) --------------------------------------------
+# The keep-awake tool is stubbed under both names ccs can reach for (caffeinate
+# on Darwin, systemd-inhibit on Linux), so the same assertions hold on either CI
+# runner. Every flag ccs passes is -x or --k=v, so the stub's shift loop lands
+# exactly on `claude` — which is also why gnome-session-inhibit, the one form
+# with a separate value word, is never reached here.
+CAFF_DIR=""
+
+caffeine_shims() {
+    CAFF_DIR=$(mktemp -d)
+    printf '#!/bin/sh\necho "CLAUDE_ARGV:$*"\nenv | grep -E "^ANTHROPIC_" || true\n' \
+        > "$CAFF_DIR/claude"
+    chmod +x "$CAFF_DIR/claude"
+    for tool in caffeinate systemd-inhibit; do
+        cat > "$CAFF_DIR/$tool" <<'SHIM'
+#!/bin/sh
+echo "CAFFEINE_ARGS:$*"
+while :; do case "${1:-}" in -*) shift ;; *) break ;; esac; done
+exec "$@"
+SHIM
+        chmod +x "$CAFF_DIR/$tool"
+    done
+}
+
+# What ccs should hand the tool on this OS, per mode
+case "$(uname -s 2>/dev/null || printf 'unknown')" in
+    Darwin) CAFF_SYSTEM="CAFFEINE_ARGS:-ims "
+            CAFF_DISPLAY="CAFFEINE_ARGS:-dims " ;;
+    Linux)  CAFF_SYSTEM="CAFFEINE_ARGS:--what=sleep "
+            CAFF_DISPLAY="CAFFEINE_ARGS:--what=sleep:idle " ;;
+    *)      CAFF_SYSTEM="" CAFF_DISPLAY="" ;;
+esac
+
+# -- Caffeine: the persistent toggle --
+printf '\033[1m[caffeine toggle]\033[0m\n'
+setup
+CFG="$TEST_CONFIG_DIR/.claude-provider/config"
+out=$("$CCS" caffeine status)
+assert_contains "caffeine is off by default" "Caffeine:  off" "$out"
+"$CCS" caffeine on >/dev/null 2>&1
+assert_contains "on writes caffeine=system" "caffeine=system" "$(cat "$CFG")"
+out=$("$CCS" caffeine status)
+assert_contains "status reports the system mode" "on (system" "$out"
+"$CCS" caffeine on display >/dev/null 2>&1
+assert_contains "on display writes caffeine=display" "caffeine=display" "$(cat "$CFG")"
+"$CCS" caffeine off >/dev/null 2>&1
+assert_contains "off writes caffeine=off" "caffeine=off" "$(cat "$CFG")"
+assert_contains "status reports off again" "Caffeine:  off" "$("$CCS" caffeine status)"
+assert_exit "invalid mode rejected" "1" "$CCS" caffeine on badmode
+assert_exit "invalid subcommand rejected" "1" "$CCS" caffeine badsub
+teardown
+
+# -- Caffeine: what actually wraps the launch --
+printf '\033[1m[caffeine launch wrapping]\033[0m\n'
+setup
+caffeine_shims
+set_all_keys "sk-ant-test"
+"$CCS" use anthropic >/dev/null 2>&1
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" launch 2>/dev/null)
+assert_not_contains "off launches with no wrapper" "CAFFEINE_ARGS" "$out"
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" --caffeine 2>/dev/null)
+assert_contains "--caffeine wraps the launch" "CAFFEINE_ARGS" "$out"
+assert_contains "--caffeine never reaches claude" "CLAUDE_ARGV:" "$out"
+assert_not_contains "claude gets no caffeine flag" "CLAUDE_ARGV:--caffeine" "$out"
+assert_contains "provider env still reaches claude" "ANTHROPIC_API_KEY=sk-ant-test" "$out"
+if [ -n "$CAFF_SYSTEM" ]; then
+    assert_contains "system mode passes the right flags" "$CAFF_SYSTEM" "$out"
+fi
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" --caffeine --continue -p hi 2>/dev/null)
+assert_contains "claude keeps its own arguments" "CLAUDE_ARGV:--continue -p hi" "$out"
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" --caffeine=display 2>/dev/null)
+if [ -n "$CAFF_DISPLAY" ]; then
+    assert_contains "display mode passes the right flags" "$CAFF_DISPLAY" "$out"
+fi
+# The config is only consulted through parse_config, which load_state skips
+# whenever an active state file exists — `ccs use` above wrote one.
+"$CCS" caffeine on >/dev/null 2>&1
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" launch 2>/dev/null)
+assert_contains "config toggle survives an active state file" "CAFFEINE_ARGS" "$out"
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" --no-caffeine 2>/dev/null)
+assert_not_contains "--no-caffeine overrides the config" "CAFFEINE_ARGS" "$out"
+out=$("$CCS" status)
+assert_contains "ccs status shows the caffeine state" "Caffeine:  on" "$out"
+# A third-party provider takes the other exec branch entirely
+"$CCS" use zai >/dev/null 2>&1
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" launch 2>/dev/null)
+assert_contains "third-party launch is wrapped too" "CAFFEINE_ARGS" "$out"
+assert_contains "third-party env still reaches claude" "ANTHROPIC_AUTH_TOKEN=sk-ant-test" "$out"
+rm -rf "$CAFF_DIR"
+teardown
+
+# -- Caffeine: env cannot carry a sleep assertion --
+printf '\033[1m[caffeine and ccs env]\033[0m\n'
+setup
+set_all_keys "sk-ant-test"
+"$CCS" use anthropic >/dev/null 2>&1
+"$CCS" caffeine on >/dev/null 2>&1
+out=$("$CCS" env 2>/dev/null)
+assert_not_contains "the note stays off stdout" "cannot keep a machine awake" "$out"
+assert_contains "stdout is still just exports" "export ANTHROPIC_MODEL=" "$out"
+err=$("$CCS" env 2>&1 >/dev/null)
+assert_contains "the note goes to stderr" "cannot keep a machine awake" "$err"
+"$CCS" caffeine off >/dev/null 2>&1
+err=$("$CCS" env 2>&1 >/dev/null)
+assert_not_contains "no note when caffeine is off" "cannot keep a machine awake" "$err"
+teardown
+
+# -- Caffeine: no keep-awake tool on this OS --
+printf '\033[1m[caffeine without a tool]\033[0m\n'
+setup
+caffeine_shims
+# uname is the only thing that picks the branch, and nothing else on the launch
+# path calls it — shadow it to reach the "unsupported OS" arm on any runner.
+cat > "$CAFF_DIR/uname" <<'SHIM'
+#!/bin/sh
+[ "${1:-}" = "-s" ] && { echo SunOS; exit 0; }
+exec /usr/bin/uname "$@"
+SHIM
+chmod +x "$CAFF_DIR/uname"
+set_all_keys "sk-ant-test"
+"$CCS" use anthropic >/dev/null 2>&1
+"$CCS" caffeine on >/dev/null 2>&1
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" launch 2>&1)
+assert_contains "a missing tool warns" "will not stay awake" "$out"
+assert_contains "a missing tool still launches claude" "CLAUDE_ARGV:" "$out"
+assert_not_contains "and wraps nothing" "CAFFEINE_ARGS" "$out"
+rm -rf "$CAFF_DIR"
+teardown
+
+# -- Caffeine: the vanilla fallback is caffeinated too --
+printf '\033[1m[caffeine vanilla fallback]\033[0m\n'
+setup
+caffeine_shims
+# No API key anywhere → vanilla claude, which is about the machine either way
+"$CCS" caffeine on >/dev/null 2>&1
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" launch 2>&1)
+assert_contains "vanilla fallback still warns" "vanilla" "$out"
+assert_contains "vanilla fallback is wrapped" "CAFFEINE_ARGS" "$out"
+assert_contains "vanilla claude still runs" "CLAUDE_ARGV:" "$out"
+rm -rf "$CAFF_DIR"
 teardown
 
 # --- Sync helpers ---------------------------------------------------------
