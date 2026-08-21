@@ -4,7 +4,7 @@
 
 ## Project overview
 
-`ccs` (Claude Code Switch) is a minimal POSIX sh script for switching Claude Code between AI providers. It is a **sidecar tool** — `claude` always works as-is with zero interference. `ccs` only injects env vars into the child process spawned when running `ccs` (defaults to launch).
+`ccs` (Claude Code Switch) is a minimal POSIX sh script for switching Claude Code between AI providers, and for backing up the `~/.claude` config that makes a good install. It is a **sidecar tool** — `claude` always works as-is. Provider switching only injects env vars into the child process spawned when running `ccs` (defaults to launch); the two commands that do write to `~/.claude` are listed under Core principle below.
 
 ## Core principle
 
