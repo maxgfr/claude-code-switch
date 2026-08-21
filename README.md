@@ -1,8 +1,8 @@
 # claude-code-switch
 
-Minimal, zero-dependency provider switching for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). One shell script to rule them all.
+Minimal provider switching for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). One POSIX shell script to rule them all — no python, no node.
 
-Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, or any custom endpoint) with a single command, and get each model's **real context window** instead of Claude Code's 200k guess. **`claude` always works as-is** — `ccs` is a sidecar that only injects env vars when you explicitly run `ccs`.
+Switch between AI providers (Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, or any custom endpoint) with a single command, get each model's **real context window** instead of Claude Code's 200k guess, and keep the `~/.claude` config that makes a good install backed up on a gist or a private repo. **`claude` always works as-is** — running it never goes through `ccs`, and switching provider only injects env vars into the process `ccs` spawns.
 
 Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-code-switch), stripped down to the essentials: **switch provider, set model, launch claude**.
 
@@ -12,8 +12,8 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 - **Default model**: configurable globally and per provider
 - **Right-sized context window**: detects each model's real window so auto-compact stops assuming 200k
 - **Config backup & sync**: push `~/.claude` to a gist or private repo, restore it on any machine
-- **Tiny footprint**: pure POSIX sh — no python, no node; Homebrew pulls `jq` and `llm-models` for you
-- **Zero interference**: `claude` always works normally — `ccs` never touches your shell or Claude config
+- **Tiny footprint**: pure POSIX sh — no python, no node; `jq`, `llm-models`, `git` and `gh` are all optional, and each feature degrades instead of breaking when one is missing
+- **Zero interference**: switching provider never touches your shell, your dotfiles or your Claude Code config. Only `ccs notify` and `ccs sync` write to `~/.claude` — both explicit opt-in, both reversible, both backed up first
 - **Direct launch**: `ccs` starts Claude Code with the right env vars (scoped to that process)
 - **Shell integration** (optional): `eval "$(ccs env)"` exports vars to your current session
 - **API key validation**: clear errors when a provider is not configured
@@ -63,6 +63,14 @@ ccs
 
 ```
 >>> Launching claude with zai / glm-5.3 (1.0M context)
+```
+
+And to stop rebuilding your Claude Code setup by hand on every new machine:
+
+```sh
+ccs sync init --gist-new   # 1. create a secret gist for it
+ccs sync push              # 2. back up ~/.claude
+ccs sync pull              # 3. …restore it anywhere else
 ```
 
 ## Usage
