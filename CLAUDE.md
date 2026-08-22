@@ -95,8 +95,17 @@ and `--no-caffeine`.
 - `caffeine_mode` calls `parse_config` itself. It has to: `load_state` returns early without ever
   parsing the config whenever `~/.claude-provider/active` exists, which would make a configured
   `caffeine=` read as empty. There is a test for exactly this
-- **Never fatal.** No `caffeinate` / `systemd-inhibit` / `gnome-session-inhibit`, or an OS ccs
-  doesn't know → `warn` once and launch anyway. Same contract as `llm-models` being absent
+- **Never fatal, and never silently useless.** No `caffeinate` / `systemd-inhibit` /
+  `gnome-session-inhibit`, or an OS ccs doesn't know (Git Bash reports `MINGW64_NT-*`, Cygwin
+  `CYGWIN_NT-*`, BSD its own) → `warn` once and launch anyway. Same contract as `llm-models`
+- **WSL is special-cased** because it is the one platform that would look like it worked: `uname -s`
+  says `Linux` and `systemd-inhibit` may well exist, but a Linux VM has no reach into the Windows
+  host's power management, so the host sleeps regardless. Detected via `microsoft` in
+  `/proc/sys/kernel/osrelease` (both WSL1 and WSL2 match) → warn, no wrapper. `CCS_OSRELEASE`
+  overrides that path **for the test suite only**, so the branch is covered on macOS and ubuntu
+  runners alike; nothing else should ever set it
+- Native Windows is out of scope: `ccs` is POSIX sh and cannot run there. claudfeine keeps its
+  PowerShell wrapper (`SetThreadExecutionState`) for that case
 - Two modes because keeping the display lit all night is rarely wanted: `system` (default,
   `caffeinate -ims` / `--what=sleep`) and `display` (`-dims` / `--what=sleep:idle`)
 - State is `[_defaults] caffeine=` — a single key, not a new `_` section, since it sits next to

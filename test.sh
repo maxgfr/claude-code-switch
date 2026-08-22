@@ -717,6 +717,79 @@ assert_contains "vanilla claude still runs" "CLAUDE_ARGV:" "$out"
 rm -rf "$CAFF_DIR"
 teardown
 
+# -- Caffeine: ccs only, claude untouched --
+# The whole point of the sidecar contract: caffeine must leave ~/.claude
+# exactly as it found it, and must never leak a flag into claude's argv.
+printf '\033[1m[caffeine touches nothing of claude]\033[0m\n'
+setup
+caffeine_shims
+mkdir -p "$TEST_CONFIG_DIR/.claude/agents"
+printf '{"model":"opus"}\n' > "$TEST_CONFIG_DIR/.claude/settings.json"
+printf '# global\n' > "$TEST_CONFIG_DIR/.claude/CLAUDE.md"
+printf 'x\n' > "$TEST_CONFIG_DIR/.claude/agents/a.md"
+before=$(find "$TEST_CONFIG_DIR/.claude" | sort)
+before_sum=$(cat "$TEST_CONFIG_DIR/.claude/settings.json" "$TEST_CONFIG_DIR/.claude/CLAUDE.md")
+set_all_keys "sk-ant-test"
+"$CCS" use anthropic >/dev/null 2>&1
+"$CCS" caffeine on >/dev/null 2>&1
+"$CCS" caffeine on display >/dev/null 2>&1
+"$CCS" caffeine status >/dev/null 2>&1
+PATH="$CAFF_DIR:$PATH" "$CCS" launch >/dev/null 2>&1
+PATH="$CAFF_DIR:$PATH" "$CCS" --caffeine >/dev/null 2>&1
+"$CCS" caffeine off >/dev/null 2>&1
+assert_eq "no file added or removed under ~/.claude" "$before" \
+    "$(find "$TEST_CONFIG_DIR/.claude" | sort)"
+assert_eq "settings.json and CLAUDE.md byte-identical" "$before_sum" \
+    "$(cat "$TEST_CONFIG_DIR/.claude/settings.json" "$TEST_CONFIG_DIR/.claude/CLAUDE.md")"
+assert_not_contains "no hook was installed" "hooks" "$(cat "$TEST_CONFIG_DIR/.claude/settings.json")"
+# ...and the state it does write is one key in its own config
+assert_contains "state lives in the ccs config" "caffeine=off" \
+    "$(cat "$TEST_CONFIG_DIR/.claude-provider/config")"
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" --caffeine --no-caffeine --caffeine=display -p hi 2>/dev/null)
+assert_contains "claude sees only its own arguments" "CLAUDE_ARGV:-p hi" "$out"
+rm -rf "$CAFF_DIR"
+teardown
+
+# -- Caffeine: platforms ccs cannot keep awake --
+# Git Bash / MSYS / Cygwin report a Windows uname; WSL reports Linux but cannot
+# reach the Windows host's power management. Both must degrade, never break.
+printf '\033[1m[caffeine on unsupported platforms]\033[0m\n'
+setup
+caffeine_shims
+set_all_keys "sk-ant-test"
+"$CCS" use anthropic >/dev/null 2>&1
+"$CCS" caffeine on >/dev/null 2>&1
+for fake_os in MINGW64_NT-10.0-26100 CYGWIN_NT-10.0 FreeBSD; do
+    cat > "$CAFF_DIR/uname" <<SHIM
+#!/bin/sh
+[ "\${1:-}" = "-s" ] && { echo $fake_os; exit 0; }
+exec /usr/bin/uname "\$@"
+SHIM
+    chmod +x "$CAFF_DIR/uname"
+    out=$(PATH="$CAFF_DIR:$PATH" "$CCS" launch 2>&1)
+    assert_contains "$fake_os warns instead of wrapping" "will not stay awake" "$out"
+    assert_contains "$fake_os still launches claude" "CLAUDE_ARGV:" "$out"
+done
+# WSL: uname says Linux, /proc/sys/kernel/osrelease gives it away
+cat > "$CAFF_DIR/uname" <<'SHIM'
+#!/bin/sh
+[ "${1:-}" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+SHIM
+chmod +x "$CAFF_DIR/uname"
+printf '5.15.167.4-microsoft-standard-WSL2\n' > "$CAFF_DIR/osrelease"
+out=$(PATH="$CAFF_DIR:$PATH" CCS_OSRELEASE="$CAFF_DIR/osrelease" "$CCS" launch 2>&1)
+assert_contains "WSL says the Windows host is out of reach" "WSL cannot keep the Windows host awake" "$out"
+assert_contains "WSL still launches claude" "CLAUDE_ARGV:" "$out"
+assert_not_contains "WSL wraps nothing" "CAFFEINE_ARGS" "$out"
+# A real Linux osrelease must not trip the WSL branch
+printf '6.8.0-generic\n' > "$CAFF_DIR/osrelease"
+out=$(PATH="$CAFF_DIR:$PATH" CCS_OSRELEASE="$CAFF_DIR/osrelease" "$CCS" launch 2>&1)
+assert_not_contains "plain Linux is not mistaken for WSL" "WSL cannot" "$out"
+assert_contains "plain Linux wraps normally" "CAFFEINE_ARGS:--what=sleep " "$out"
+rm -rf "$CAFF_DIR"
+teardown
+
 # --- Sync helpers ---------------------------------------------------------
 # The whole sync suite runs against a bare repo on disk reached over file://,
 # so it never touches the network and never needs gh. git identity is written

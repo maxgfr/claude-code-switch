@@ -22,6 +22,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # as space-free words, spliced unquoted into the exec in cmd_launch.
 CAFFEINE_CMD=""                               # e.g. "caffeinate -ims", empty = no wrapper
 CAFFEINE_OVERRIDE=""                          # --caffeine / --no-caffeine, beats the config
+# Where WSL identifies itself. Overridable only so the test suite can reach the
+# WSL branch from a runner that is not WSL — there is no reason to set it.
+CCS_OSRELEASE="${CCS_OSRELEASE:-/proc/sys/kernel/osrelease}"
 
 # --- Sync constants ---
 SYNC_DIR="${CONFIG_DIR}/sync"                 # git working copy mirroring the remote
@@ -740,6 +743,13 @@ caffeine_resolve() {
             fi
             ;;
         Linux)
+            # WSL reports Linux but has no reach into the Windows host's power
+            # management: systemd-inhibit would hold the VM awake while Windows
+            # sleeps anyway. Say so instead of pretending it worked.
+            if grep -qi microsoft "$CCS_OSRELEASE" 2>/dev/null; then
+                warn "WSL cannot keep the Windows host awake — set it in Windows' power settings"
+                return 1
+            fi
             if command -v systemd-inhibit >/dev/null 2>&1; then
                 # sleep blocks suspend; idle also blocks the idle timer that
                 # blanks the screen, which is the display mode's whole point
@@ -1051,7 +1061,9 @@ ${C_BOLD}KEEP AWAKE${C_RESET}
         display   the screen stays lit too — 'ccs caffeine on display'
 
     macOS uses caffeinate, Linux systemd-inhibit (or gnome-session-inhibit).
-    On anything else ccs warns once and launches normally — never fatal.
+    Everywhere else — WSL, Git Bash, BSD — ccs warns once and launches
+    normally. It is never fatal, and never pretends to have worked.
+    Native Windows is out of reach for a POSIX sh script: use claudfeine.
 
     A sleep assertion is a running process, not an environment variable, so
     'eval "\$(ccs env)"' cannot carry it. Launch through 'ccs' to get it.

@@ -367,8 +367,24 @@ Two modes, because keeping the screen lit all night is rarely what you want:
 | `system` (default) | `caffeinate -ims` | `--what=sleep` | Machine stays awake, screen may sleep |
 | `display` | `caffeinate -dims` | `--what=sleep:idle` | Screen stays lit too |
 
-Linux falls back to `gnome-session-inhibit` when `systemd-inhibit` is absent. On any other OS `ccs`
-warns once and launches normally — a missing keep-awake tool is never fatal.
+Linux falls back to `gnome-session-inhibit` when `systemd-inhibit` is absent.
+
+**Platform support**, in full:
+
+| Platform | Keep-awake |
+|---|---|
+| macOS | ✅ `caffeinate` |
+| Linux (systemd) | ✅ `systemd-inhibit` |
+| Linux (GNOME, no systemd) | ✅ `gnome-session-inhibit` |
+| Linux, neither present | ⚠️ warns, launches normally |
+| WSL | ⚠️ warns — a Linux VM cannot keep the Windows host awake, set it in Windows' power settings |
+| Git Bash / MSYS / Cygwin | ⚠️ warns, launches normally |
+| anything else (BSD…) | ⚠️ warns, launches normally |
+
+There is no native Windows support: `ccs` is a POSIX shell script and cannot run there. For Windows
+use [claudfeine](https://github.com/maxgfr/claudfeine), which ships a PowerShell wrapper built on
+`SetThreadExecutionState`. In every ⚠️ case the session launches exactly as it would have — a
+missing keep-awake tool is never fatal, and never silently pretends to have worked.
 
 Two things worth knowing:
 
