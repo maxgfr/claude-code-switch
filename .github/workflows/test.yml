@@ -24,3 +24,59 @@ jobs:
 
       - name: Run test suite
         run: ./test.sh
+
+  keepawake:
+    name: Keep awake (real systemd-inhibit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # test.sh stubs the keep-awake tool, which proves the flags ccs passes but
+      # not that systemd accepts them. This runs the real thing and requires the
+      # inhibitor lock to actually exist while the wrapped process is alive.
+      - name: ccs --caffeine takes a real inhibitor lock
+        run: |
+          set -eu
+          command -v systemd-inhibit
+
+          # Tell "this runner cannot inhibit" apart from "ccs is broken": probe
+          # first, and only hold ccs to the result if the probe itself works.
+          if ! systemd-inhibit --what=sleep --who=probe --why=probe --mode=block true; then
+              echo "::notice::this runner cannot take an inhibitor lock — ccs not exercised"
+              exit 0
+          fi
+
+          HOME=$(mktemp -d); export HOME
+          SHIM=$(mktemp -d)
+          printf '#!/bin/sh\nsystemd-inhibit --list\n' > "$SHIM/claude"
+          chmod +x "$SHIM/claude"
+
+          ./ccs help >/dev/null
+          sed -i 's/^api_key=$/api_key=sk-ant-test/' "$HOME/.claude-provider/config"
+          ./ccs use anthropic >/dev/null
+
+          # The lock ccs holds, as systemd reports it while claude is running
+          lock() { PATH="$SHIM:$PATH" ./ccs "$1" 2>&1 | grep 'ccs' || true; }
+
+          echo "--- system mode: blocks sleep, leaves idle alone ---"
+          sys=$(lock --caffeine); echo "${sys:-<none>}"
+          case "$sys" in
+              *sleep:idle*) echo "FAIL: system mode should not inhibit idle"; exit 1 ;;
+              *sleep*)      echo "ok" ;;
+              *)            echo "FAIL: no ccs inhibitor lock while claude ran"; exit 1 ;;
+          esac
+
+          echo "--- display mode: blocks idle too ---"
+          disp=$(lock --caffeine=display); echo "${disp:-<none>}"
+          case "$disp" in
+              *sleep:idle*) echo "ok" ;;
+              *)            echo "FAIL: display mode did not inhibit idle"; exit 1 ;;
+          esac
+
+          echo "--- and the lock is gone once the session ends ---"
+          if systemd-inhibit --list | grep -q 'ccs'; then
+              echo "FAIL: an inhibitor lock outlived the session"
+              exit 1
+          fi
+          echo "OK"

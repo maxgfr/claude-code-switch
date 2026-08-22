@@ -119,9 +119,17 @@ and `--no-caffeine`.
 - Ported from [claudfeine](https://github.com/maxgfr/claudfeine), which stays the standalone
   wrapper for people not using ccs. Windows is out of scope here (ccs is POSIX sh)
 - `test.sh` stubs the tool under **both** `caffeinate` and `systemd-inhibit` so the same assertions
-  run on the macOS and ubuntu runners, and shadows `uname` to reach the unsupported-OS branch.
-  Because every flag is `-x` or `--k=v`, the stub's `while case $1 in -*) shift` loop lands exactly
-  on `claude`
+  run on the macOS and ubuntu runners, and shadows `uname` to reach the WSL, Windows-shell and
+  unknown-OS branches. Because every flag is `-x` or `--k=v`, the stub's
+  `while case $1 in -*) shift` loop lands exactly on `claude`
+- The `gnome-session-inhibit` fallback needs `systemd-inhibit` genuinely absent from `PATH`, so its
+  test rebuilds `PATH` from symlinks to the binaries ccs needs — the same trick as
+  `[sync: git absent]`. Without it that branch would be code that runs nowhere
+- A stub proves the flags ccs passes, not that systemd accepts them, so the **`keepawake` CI job**
+  runs the real `systemd-inhibit` on ubuntu and requires the lock to exist while the wrapped
+  process is alive (`sleep` without `idle` in system mode, `sleep:idle` in display mode) and to be
+  gone afterwards. It probes the runner's own ability to inhibit first, so a runner limitation
+  never reads as a ccs pass
 
 ## Config sync (`ccs sync`)
 

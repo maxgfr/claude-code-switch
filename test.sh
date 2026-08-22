@@ -790,6 +790,49 @@ assert_contains "plain Linux wraps normally" "CAFFEINE_ARGS:--what=sleep " "$out
 rm -rf "$CAFF_DIR"
 teardown
 
+# -- Caffeine: the gnome-session-inhibit fallback --
+# Reached only when systemd-inhibit is absent, so the PATH is rebuilt from
+# scratch with just the binaries ccs needs — same trick as [sync: git absent].
+# Without this the fallback would be code that never runs anywhere.
+printf '\033[1m[caffeine gnome fallback]\033[0m\n'
+setup
+set_all_keys "sk-ant-test"
+"$CCS" use anthropic >/dev/null 2>&1
+"$CCS" caffeine on >/dev/null 2>&1
+NOSD_DIR=$(mktemp -d)
+for b in sh sed awk grep find mkdir mktemp date cat cp rm mv ls chmod rmdir \
+         head tail tr wc diff sort stat env dirname basename rev cut \
+         touch sleep kill expr pgrep; do
+    p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$NOSD_DIR/$b"
+done
+REAL_UNAME=$(command -v uname)
+cat > "$NOSD_DIR/uname" <<SHIM
+#!/bin/sh
+[ "\${1:-}" = "-s" ] && { echo Linux; exit 0; }
+exec $REAL_UNAME "\$@"
+SHIM
+cat > "$NOSD_DIR/gnome-session-inhibit" <<'SHIM'
+#!/bin/sh
+echo "CAFFEINE_ARGS:$*"
+while :; do case "${1:-}" in --inhibit|--reason) shift 2 ;; -*) shift ;; *) break ;; esac; done
+exec "$@"
+SHIM
+printf '#!/bin/sh\necho "CLAUDE_ARGV:$*"\n' > "$NOSD_DIR/claude"
+chmod +x "$NOSD_DIR/uname" "$NOSD_DIR/gnome-session-inhibit" "$NOSD_DIR/claude"
+assert_eq "the stub PATH really has no systemd-inhibit" "false" \
+    "$([ -e "$NOSD_DIR/systemd-inhibit" ] && echo true || echo false)"
+assert_eq "and no caffeinate either" "false" \
+    "$([ -e "$NOSD_DIR/caffeinate" ] && echo true || echo false)"
+out=$(PATH="$NOSD_DIR" "$CCS" launch 2>&1)
+assert_contains "falls back to gnome-session-inhibit" \
+    "CAFFEINE_ARGS:--inhibit suspend --reason ccs-session" "$out"
+assert_contains "and still runs claude" "CLAUDE_ARGV:" "$out"
+out=$(PATH="$NOSD_DIR" "$CCS" --caffeine=display 2>&1)
+assert_contains "display mode inhibits idle too" \
+    "CAFFEINE_ARGS:--inhibit suspend:idle --reason ccs-session" "$out"
+rm -rf "$NOSD_DIR"
+teardown
+
 # --- Sync helpers ---------------------------------------------------------
 # The whole sync suite runs against a bare repo on disk reached over file://,
 # so it never touches the network and never needs gh. git identity is written
