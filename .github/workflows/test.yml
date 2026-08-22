@@ -40,24 +40,29 @@ jobs:
           set -eu
           command -v systemd-inhibit
 
-          # Tell "this runner cannot inhibit" apart from "ccs is broken": probe
-          # first, and only hold ccs to the result if the probe itself works.
-          if ! systemd-inhibit --what=sleep --who=probe --why=probe --mode=block true; then
+          # The runner process is in no logind session and the image ships no
+          # polkit, so logind denies inhibitor locks to the `runner` user
+          # ("Failed to inhibit: Access denied"). Root is allowed, hence sudo.
+          # Probe first, so a runner limitation can never read as a ccs pass.
+          if ! sudo systemd-inhibit --what=sleep --who=probe --why=probe --mode=block true; then
               echo "::notice::this runner cannot take an inhibitor lock — ccs not exercised"
               exit 0
           fi
 
-          HOME=$(mktemp -d); export HOME
+          CCS_HOME=$(mktemp -d)
           SHIM=$(mktemp -d)
           printf '#!/bin/sh\nsystemd-inhibit --list\n' > "$SHIM/claude"
           chmod +x "$SHIM/claude"
 
-          ./ccs help >/dev/null
-          sed -i 's/^api_key=$/api_key=sk-ant-test/' "$HOME/.claude-provider/config"
-          ./ccs use anthropic >/dev/null
+          # sudo resets HOME and PATH, so both are handed over explicitly
+          run() { sudo env "HOME=$CCS_HOME" "PATH=$SHIM:$PATH" ./ccs "$@"; }
+
+          run help >/dev/null
+          sudo sed -i 's/^api_key=$/api_key=sk-ant-test/' "$CCS_HOME/.claude-provider/config"
+          run use anthropic >/dev/null
 
           # The lock ccs holds, as systemd reports it while claude is running
-          lock() { PATH="$SHIM:$PATH" ./ccs "$1" 2>&1 | grep 'ccs' || true; }
+          lock() { run "$1" 2>&1 | grep 'ccs' || true; }
 
           echo "--- system mode: blocks sleep, leaves idle alone ---"
           sys=$(lock --caffeine); echo "${sys:-<none>}"
@@ -75,7 +80,7 @@ jobs:
           esac
 
           echo "--- and the lock is gone once the session ends ---"
-          if systemd-inhibit --list | grep -q 'ccs'; then
+          if sudo systemd-inhibit --list | grep -q 'ccs'; then
               echo "FAIL: an inhibitor lock outlived the session"
               exit 1
           fi
