@@ -193,6 +193,7 @@ Located at `~/.claude-provider/config`. Simple INI format, editable by hand:
 [_defaults]
 provider=anthropic
 model=claude-sonnet-5
+caffeine=off
 
 [anthropic]
 base_url=
@@ -221,6 +222,8 @@ haiku_model=glm-4.7
 - **`context_tokens=`** — optional, pins the context window (plain integer; empty means auto)
 - **`max_output_tokens=`** — optional, pins the output limit (plain integer; empty means auto)
 - **`auto_context=`** — in `[_defaults]`, set to `false` to disable the automatic lookup
+- **`caffeine=`** — in `[_defaults]`, `off` (default), `system` or `display`; written by
+  `ccs caffeine on|off` (see [Keep the machine awake](#keep-the-machine-awake))
 
 Sections whose name starts with `_` are **reserved**: they hold settings, never providers, so they
 never show up in `ccs list`. Alongside `[_defaults]` there is `[_sync]`, normally written by
@@ -381,10 +384,9 @@ Linux falls back to `gnome-session-inhibit` when `systemd-inhibit` is absent.
 | Git Bash / MSYS / Cygwin | ⚠️ warns, launches normally |
 | anything else (BSD…) | ⚠️ warns, launches normally |
 
-There is no native Windows support: `ccs` is a POSIX shell script and cannot run there. For Windows
-use [claudfeine](https://github.com/maxgfr/claudfeine), which ships a PowerShell wrapper built on
-`SetThreadExecutionState`. In every ⚠️ case the session launches exactly as it would have — a
-missing keep-awake tool is never fatal, and never silently pretends to have worked.
+There is no native Windows support: `ccs` is a POSIX shell script and cannot run there. In every
+⚠️ case the session launches exactly as it would have — a missing keep-awake tool is never fatal,
+and never silently pretends to have worked.
 
 Two things worth knowing:
 
@@ -395,8 +397,9 @@ Two things worth knowing:
 The state lives in `[_defaults] caffeine=` in `~/.claude-provider/config` — nothing outside
 `~/.claude-provider/` is touched, so this is *not* an exception to the zero-interference principle.
 
-Not using `ccs`? [claudfeine](https://github.com/maxgfr/claudfeine) is the same idea as a standalone
-wrapper around `claude` (and `codex`).
+Not using `ccs`, or on native Windows? [claudfeine](https://github.com/maxgfr/claudfeine) is the
+same idea as a standalone wrapper around `claude` (and `codex`), and ships a PowerShell wrapper
+built on `SetThreadExecutionState` for Windows.
 
 ## Config backup & sync
 
