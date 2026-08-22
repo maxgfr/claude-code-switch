@@ -9,8 +9,11 @@
 #   haiku_model=model-name    (optional, for /models haiku tier + fast tasks)
 #   context_tokens=200000     (optional, pins the context window — plain integer)
 #   max_output_tokens=64000   (optional, pins the output limit — plain integer)
+#   native=true               (optional, see [claude] below — ignores every key above)
 #
-# Special: [anthropic] does not need base_url (uses native API)
+# Special: [claude] configures nothing at all — running ccs is then exactly
+#          like running claude, on whatever account claude is logged into
+# Special: [anthropic] does not need base_url (uses native API, with your key)
 # Special: [_defaults] section sets global defaults
 # opus_model and haiku_model fall back to model if empty
 #
@@ -20,8 +23,8 @@
 # Set auto_context=false in [_defaults] to disable the lookup entirely.
 
 [_defaults]
-provider=anthropic
-model=claude-sonnet-5
+provider=claude
+model=
 auto_context=true
 # Keep the machine awake while claude runs — see `ccs caffeine`
 #   off | system (screen may sleep) | display (screen stays lit)
@@ -43,6 +46,13 @@ include_ccs=false
 auto_launch=false
 auto_hooks=false
 prune=true
+
+# Native login — exactly what `claude` does on its own: no base_url, no key, no
+# model override, nothing exported. ccs only wraps it (keep awake, config sync),
+# so it runs on whatever account claude is already logged into. Any section with
+# native=true behaves this way, and every other key in it is ignored.
+[claude]
+native=true
 
 [anthropic]
 base_url=

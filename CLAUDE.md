@@ -4,7 +4,7 @@
 
 ## Project overview
 
-`ccs` (Claude Code Switch) is a minimal POSIX sh script for switching Claude Code between AI providers, for backing up the `~/.claude` config that makes a good install, and for keeping the machine awake while a session runs. It is a **sidecar tool** — `claude` always works as-is. Provider switching only injects env vars into the child process spawned when running `ccs` (defaults to launch); the two commands that do write to `~/.claude` are listed under Core principle below.
+`ccs` (Claude Code Switch) is a minimal POSIX sh script for switching Claude Code between AI providers — including a `[claude]` provider that switches to *nothing*, i.e. claude on its own login — for backing up the `~/.claude` config that makes a good install, and for keeping the machine awake while a session runs. It is a **sidecar tool** — `claude` always works as-is. Provider switching only injects env vars into the child process spawned when running `ccs` (defaults to launch); the two commands that do write to `~/.claude` are listed under Core principle below.
 
 ## Core principle
 
@@ -21,7 +21,8 @@
 
 - **Single script**: `ccs` (~2500 lines of POSIX sh)
 - **Config**: INI format at `~/.claude-provider/config`, parsed with shell builtins (`while read` + `case`)
-- **State**: `~/.claude-provider/active` stores current provider/model (removed by `ccs reset`)
+- **State**: `~/.claude-provider/active` stores current provider/model, plus `NATIVE=` for the
+  native login (removed by `ccs reset`)
 - **Model cache**: `~/.claude-provider/models-cache` stores resolved context windows (survives
   `reset`, removed by `purge`)
 - **Sync state**: `~/.claude-provider/sync/` (git working copy), `sync-backup/<timestamp>/`
@@ -32,6 +33,35 @@
   `sync init --gist-new` / `--repo-new`). All degrade gracefully at runtime so a manual `curl`
   install still works
 - **Zero footprint**: `ccs reset` or `ccs purge` removes all traces
+
+## Native login (`[claude]`, `native=true`)
+
+- The default provider on a fresh install, and the one that configures **nothing**: no
+  `ANTHROPIC_BASE_URL`, no key, no model, no window. `cmd_launch` gets a third branch that is pure
+  `env -u ... $CAFFEINE_CMD claude "$@"`. Launching through `ccs` becomes indistinguishable from
+  running `claude`, which is what makes keep-awake and sync usable on a Claude subscription
+- **It is a config key, not a hardcoded section name.** `is_native()` reads `native=true`, so any
+  section can be one and adding another stays "add a section". A native section ignores
+  `base_url=`, `api_key=` and `model=` — there is nothing to inject
+- `NATIVE=` is persisted in `~/.claude-provider/active` because the launch path reads that file and
+  never parses the config. Files written before this exist and simply yield `ACTIVE_NATIVE=""`;
+  `read_active` must initialise it or `set -u` fires
+- **It is not `launch_vanilla()`.** That one is still the unconfigured-by-accident path (a
+  `[_defaults]` pointing at a keyless provider) and still warns. Native mode is a deliberate choice
+  and says so with a normal `info` line. Two `test.sh` sections now force
+  `set_key _defaults provider anthropic` to keep reaching the fallback
+- **The scrub is deliberate.** A pure passthrough would be marginally more "identical to claude",
+  but a leftover `eval "$(ccs env)"` for zai would then silently win. Every `ANTHROPIC_*` /
+  `CLAUDE_CODE_*` var ccs manages is `-u`'d, so `ccs use claude` always means the same thing
+- `cmd_env` mirrors it: only `unset` lines, no exports. The trailing unconditional
+  `export ANTHROPIC_MODEL` moved into the two non-native branches, and the caffeine stderr note
+  became `caffeine_env_note()` so both paths share it
+- `require_config` appends `[claude]\nnative=true` to any config that declares no `native=` key at
+  all. Guarding on the key (not the section name) makes it idempotent and leaves a config that
+  already has a native provider alone. It never rewrites an existing `[_defaults]`: an install in
+  place keeps the provider it was on, and only new configs default to `claude`
+- **Not a third exception to the zero-interference principle**: it writes only to
+  `~/.claude-provider/`, never to `~/.claude`
 
 ## Key design decisions
 
@@ -54,7 +84,8 @@
   `Stop`/`Notification` and `sync` own `SessionStart`/`SessionEnd` without either clobbering the
   other. Both also share `$HOOKS_DIR`, so neither may `rm -rf` it — only its own scripts, then
   `rmdir` if empty
-- All providers must expose an **Anthropic Messages API** compatible endpoint
+- All providers must expose an **Anthropic Messages API** compatible endpoint — except a
+  `native=true` section, which is not an endpoint at all (see Native login above)
 - `anthropic` provider is special: uses `ANTHROPIC_API_KEY`, no `ANTHROPIC_BASE_URL`
 - Third-party providers use `ANTHROPIC_AUTH_TOKEN` (not `ANTHROPIC_API_KEY`) to avoid the "Detected a custom API key" interactive prompt
 - Section names must be `[a-zA-Z0-9_]` only (no hyphens — invalid in shell variable names)
@@ -202,6 +233,7 @@ and `--no-caffeine`.
 
 1. Add `[provider_name]` section to `config.template` with `base_url`, `api_key`, `model`
 2. Add the same section to the inline fallback config in `require_config()` inside `ccs`
+   (the two must stay byte-compatible — the inline heredoc is the manual-install path)
 3. Update README.md providers table
 4. The provider **must** support the Anthropic Messages API format
 

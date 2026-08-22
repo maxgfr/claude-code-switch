@@ -337,11 +337,137 @@ setup
 SHIM_DIR=$(mktemp -d)
 printf '#!/bin/sh\necho VANILLA_CLAUDE_RAN\n' > "$SHIM_DIR/claude"
 chmod +x "$SHIM_DIR/claude"
+# The shipped default is the native [claude] provider, which is a deliberate
+# choice, not an unconfigured state. Point the default at a keyless provider to
+# get the genuinely-unconfigured case this fallback exists for.
+set_key _defaults provider anthropic
 # No API key configured anywhere → ccs should warn and run claude untouched
 out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>&1)
 assert_contains "unconfigured ccs runs vanilla claude" "VANILLA_CLAUDE_RAN" "$out"
 assert_contains "vanilla fallback warns" "vanilla" "$out"
 rm -rf "$SHIM_DIR"
+teardown
+
+# --- Native login ([claude], native=true) ---------------------------------
+# The one provider that configures nothing: launching through ccs must be
+# indistinguishable from running claude, while ccs still wraps the process.
+
+# A shim that reports exactly the variables ccs owns — the harness's own
+# CLAUDE_CODE_* vars would otherwise show up on a developer machine.
+native_shim() {
+    SHIM_DIR=$(mktemp -d)
+    printf '#!/bin/sh\necho "CLAUDE_ARGV:$*"\nenv | grep -E "^(ANTHROPIC_|CLAUDE_CODE_MAX_|CLAUDE_CODE_SUBAGENT_)" || echo NO_PROVIDER_VARS\n' \
+        > "$SHIM_DIR/claude"
+    chmod +x "$SHIM_DIR/claude"
+}
+
+printf '\033[1m[native use]\033[0m\n'
+setup
+ACTIVE="$TEST_CONFIG_DIR/.claude-provider/active"
+CFG="$TEST_CONFIG_DIR/.claude-provider/config"
+out=$("$CCS" use claude 2>&1)
+assert_contains "use claude works with no key anywhere" "native login" "$out"
+assert_contains "active records the provider" "PROVIDER=claude" "$(cat "$ACTIVE")"
+assert_contains "active records native mode" "NATIVE=1" "$(cat "$ACTIVE")"
+assert_eq "active carries no model" "MODEL=" "$(grep '^MODEL=' "$ACTIVE")"
+assert_eq "active carries no key" "API_KEY=" "$(grep '^API_KEY=' "$ACTIVE")"
+assert_contains "defaults follow" "provider=claude" "$(cat "$CFG")"
+assert_eq "defaults carry no model either" "model=" \
+    "$(awk '/^\[/ { s = $0 } s == "[_defaults]" && /^model=/ { print }' "$CFG")"
+assert_exit "the native login takes no model" "1" "$CCS" use claude glm-5.3
+set_all_keys "sk-ant-test"
+"$CCS" use zai >/dev/null 2>&1
+assert_eq "switching away clears native mode" "NATIVE=" "$(grep '^NATIVE=' "$ACTIVE")"
+teardown
+
+printf '\033[1m[native launch]\033[0m\n'
+setup
+native_shim
+"$CCS" use claude >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" \
+      ANTHROPIC_BASE_URL="http://stale.example" \
+      ANTHROPIC_API_KEY="stale-key" \
+      ANTHROPIC_AUTH_TOKEN="stale-token" \
+      ANTHROPIC_MODEL="stale-model" \
+      ANTHROPIC_DEFAULT_OPUS_MODEL="stale-opus" \
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS="999999" \
+      "$CCS" launch -p hi 2>/dev/null)
+assert_contains "native launch injects nothing" "NO_PROVIDER_VARS" "$out"
+assert_not_contains "native launch scrubs an inherited base url" "stale.example" "$out"
+assert_not_contains "native launch scrubs an inherited api key" "stale-key" "$out"
+assert_not_contains "native launch scrubs an inherited auth token" "stale-token" "$out"
+assert_not_contains "native launch scrubs an inherited model" "stale-model" "$out"
+assert_not_contains "native launch scrubs an inherited tier model" "stale-opus" "$out"
+assert_not_contains "native launch scrubs an inherited context window" "999999" "$out"
+assert_contains "claude keeps its own arguments" "CLAUDE_ARGV:-p hi" "$out"
+err=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>&1 >/dev/null)
+assert_not_contains "native mode is not the vanilla fallback" "vanilla" "$err"
+rm -rf "$SHIM_DIR"
+teardown
+
+printf '\033[1m[native is the shipped default]\033[0m\n'
+setup
+native_shim
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" -p hi 2>&1)
+assert_contains "a fresh install launches the native login" "native login" "$out"
+assert_not_contains "a fresh install no longer warns" "vanilla" "$out"
+assert_contains "claude runs untouched" "NO_PROVIDER_VARS" "$out"
+rm -rf "$SHIM_DIR"
+teardown
+
+printf '\033[1m[native env]\033[0m\n'
+setup
+"$CCS" use claude >/dev/null 2>&1
+out=$("$CCS" env 2>/dev/null)
+assert_not_contains "native env exports nothing" "export " "$out"
+assert_contains "native env unsets the api key" "unset ANTHROPIC_API_KEY" "$out"
+assert_contains "native env unsets the auth token" "unset ANTHROPIC_AUTH_TOKEN" "$out"
+assert_contains "native env unsets the base url" "unset ANTHROPIC_BASE_URL" "$out"
+assert_contains "native env unsets the model" "unset ANTHROPIC_MODEL" "$out"
+assert_contains "native env unsets the context window" "unset CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
+assert_exit "the output is valid shell" "0" sh -c "eval \"\$('$CCS' env 2>/dev/null)\""
+teardown
+
+printf '\033[1m[native status, list and models]\033[0m\n'
+setup
+"$CCS" use claude >/dev/null 2>&1
+out=$("$CCS" status)
+assert_contains "status names the provider" "claude" "$out"
+assert_contains "status says native login" "native login" "$out"
+assert_not_contains "status has no key to show" "API Key" "$out"
+assert_not_contains "status has no window to show" "Context:" "$out"
+assert_contains "status still reports keep awake" "Caffeine:" "$out"
+out=$("$CCS" list)
+assert_contains "list marks it native, not unconfigured" "native login" "$out"
+out=$("$CCS" models 2>&1)
+assert_contains "models explains there is nothing to size" "own model table" "$out"
+assert_exit "models exits clean in native mode" "0" "$CCS" models
+teardown
+
+printf '\033[1m[native migration of an older config]\033[0m\n'
+setup
+CFG="$TEST_CONFIG_DIR/.claude-provider/config"
+cat > "$CFG" <<'OLD'
+[_defaults]
+provider=zai
+model=glm-5.3
+
+[zai]
+base_url=https://api.z.ai/api/anthropic
+api_key=sk-zai-test
+model=glm-5.3
+OLD
+"$CCS" list >/dev/null 2>&1
+cfg=$(cat "$CFG")
+assert_contains "migration adds a [claude] section" "[claude]" "$cfg"
+assert_contains "migration marks it native" "native=true" "$cfg"
+assert_contains "migration keeps the existing default provider" "provider=zai" "$cfg"
+assert_contains "migration keeps the existing default model" "model=glm-5.3" "$cfg"
+assert_contains "migration keeps the existing api key" "api_key=sk-zai-test" "$cfg"
+"$CCS" list >/dev/null 2>&1
+"$CCS" status >/dev/null 2>&1 || true
+assert_eq "migration runs exactly once" "1" "$(grep -c '^native=true$' "$CFG")"
+assert_exit "use claude works afterwards" "0" "$CCS" use claude
 teardown
 
 # -- Notify: install --
@@ -709,11 +835,36 @@ printf '\033[1m[caffeine vanilla fallback]\033[0m\n'
 setup
 caffeine_shims
 # No API key anywhere → vanilla claude, which is about the machine either way
+set_key _defaults provider anthropic
 "$CCS" caffeine on >/dev/null 2>&1
 out=$(PATH="$CAFF_DIR:$PATH" "$CCS" launch 2>&1)
 assert_contains "vanilla fallback still warns" "vanilla" "$out"
 assert_contains "vanilla fallback is wrapped" "CAFFEINE_ARGS" "$out"
 assert_contains "vanilla claude still runs" "CLAUDE_ARGV:" "$out"
+rm -rf "$CAFF_DIR"
+teardown
+
+# -- Caffeine: the native login is wrapped like any other provider --
+# The whole point of the feature for a subscription user: keep awake without
+# an API key, and without a single variable reaching claude.
+printf '\033[1m[caffeine and the native login]\033[0m\n'
+setup
+caffeine_shims
+"$CCS" use claude >/dev/null 2>&1
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" launch 2>/dev/null)
+assert_not_contains "off leaves the native launch unwrapped" "CAFFEINE_ARGS" "$out"
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" --caffeine -p hi 2>/dev/null)
+assert_contains "--caffeine wraps the native launch" "CAFFEINE_ARGS" "$out"
+assert_contains "claude still runs with its arguments" "CLAUDE_ARGV:-p hi" "$out"
+assert_not_contains "and still gets no provider env" "ANTHROPIC_" "$out"
+if [ -n "$CAFF_SYSTEM" ]; then
+    assert_contains "system mode passes the same flags" "$CAFF_SYSTEM" "$out"
+fi
+"$CCS" caffeine on >/dev/null 2>&1
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" launch 2>/dev/null)
+assert_contains "the config toggle reaches the native launch" "CAFFEINE_ARGS" "$out"
+out=$(PATH="$CAFF_DIR:$PATH" "$CCS" --no-caffeine 2>/dev/null)
+assert_not_contains "--no-caffeine still overrides it" "CAFFEINE_ARGS" "$out"
 rm -rf "$CAFF_DIR"
 teardown
 

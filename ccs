@@ -158,7 +158,7 @@ get_cfg() {
 
 write_active() {
     local provider="$1" model="$2" base_url="$3" api_key="$4"
-    local opus="$5" sonnet="$6" haiku="$7"
+    local opus="$5" sonnet="$6" haiku="$7" native="${8:-}"
     cat > "$ACTIVE_FILE" <<EOF
 PROVIDER=$provider
 MODEL=$model
@@ -167,6 +167,7 @@ API_KEY=$api_key
 OPUS_MODEL=$opus
 SONNET_MODEL=$sonnet
 HAIKU_MODEL=$haiku
+NATIVE=$native
 EOF
     chmod 600 "$ACTIVE_FILE"
 }
@@ -176,7 +177,7 @@ read_active() {
         return 1
     fi
     ACTIVE_PROVIDER="" ACTIVE_MODEL="" ACTIVE_BASE_URL="" ACTIVE_API_KEY=""
-    ACTIVE_OPUS="" ACTIVE_SONNET="" ACTIVE_HAIKU=""
+    ACTIVE_OPUS="" ACTIVE_SONNET="" ACTIVE_HAIKU="" ACTIVE_NATIVE=""
     while IFS='=' read -r key value; do
         case "$key" in
             PROVIDER)     ACTIVE_PROVIDER="$value" ;;
@@ -186,6 +187,8 @@ read_active() {
             OPUS_MODEL)   ACTIVE_OPUS="$value" ;;
             SONNET_MODEL) ACTIVE_SONNET="$value" ;;
             HAIKU_MODEL)  ACTIVE_HAIKU="$value" ;;
+            # Absent from files written before native mode — empty is correct
+            NATIVE)       ACTIVE_NATIVE="$value" ;;
         esac
     done < "$ACTIVE_FILE"
     # Fallback: if tiers not set, use main model
@@ -212,8 +215,8 @@ require_config() {
         else
             cat > "$CONFIG_FILE" <<'TMPL'
 [_defaults]
-provider=anthropic
-model=claude-sonnet-5
+provider=claude
+model=
 auto_context=true
 caffeine=off
 
@@ -224,6 +227,9 @@ include_ccs=false
 auto_launch=false
 auto_hooks=false
 prune=true
+
+[claude]
+native=true
 
 [anthropic]
 base_url=
@@ -282,6 +288,17 @@ TMPL
         info "Created config at $CONFIG_FILE"
         printf '    Edit it to add your API keys: %sccs config%s\n' "${C_BOLD}" "${C_RESET}"
     fi
+
+    # Configs written before native mode have no native provider at all, so
+    # `ccs use claude` would die on an unknown provider. Append one instead of
+    # asking for a hand edit. Guarded on the key, not the section name, so a
+    # config that already declares a native provider is left alone — and so the
+    # append happens exactly once. The existing [_defaults] is never touched:
+    # an install in place keeps whatever provider it was on.
+    if [ -f "$CONFIG_FILE" ] && ! grep -qE '^[[:space:]]*native[[:space:]]*=' "$CONFIG_FILE"; then
+        printf '\n# Native login — exactly what running claude on its own does.\n[claude]\nnative=true\n' \
+            >> "$CONFIG_FILE"
+    fi
 }
 
 validate_provider() {
@@ -302,6 +319,14 @@ validate_api_key() {
     if [ -z "$key" ]; then
         die "Provider '$provider' has no API key configured. Run: ccs config"
     fi
+}
+
+# A native provider configures nothing: claude runs on its own login and ccs
+# only wraps it (caffeine, sync). base_url=, api_key= and model= in such a
+# section are ignored — there is nothing to inject. It is a config key, not a
+# hardcoded section name, so any section can be one.
+is_native() {
+    [ "$(get_cfg "$1" "native")" = "true" ]
 }
 
 resolve_model() {
@@ -527,6 +552,16 @@ load_state() {
     dm=$(get_cfg "_defaults" "model")
     [ -n "$dp" ] || return 1
     validate_provider "$dp"
+
+    # A native provider has nothing to resolve — and no API key to demand.
+    if is_native "$dp"; then
+        ACTIVE_PROVIDER="$dp"
+        ACTIVE_MODEL="" ACTIVE_BASE_URL="" ACTIVE_API_KEY=""
+        ACTIVE_OPUS="" ACTIVE_SONNET="" ACTIVE_HAIKU=""
+        ACTIVE_NATIVE="1"
+        return 0
+    fi
+
     api_key=$(get_cfg "$dp" "api_key")
     [ -n "$api_key" ] || return 2
 
@@ -544,6 +579,7 @@ load_state() {
     ACTIVE_OPUS="${opus:-$dm}"
     ACTIVE_SONNET="$dm"
     ACTIVE_HAIKU="${haiku:-$dm}"
+    ACTIVE_NATIVE=""
     return 0
 }
 
@@ -558,6 +594,19 @@ cmd_use() {
 
     parse_config
     validate_provider "$provider"
+
+    # Native login: nothing to resolve, nothing to store, no key to demand.
+    if is_native "$provider"; then
+        if [ -n "$model_arg" ]; then
+            die "Provider '$provider' is the native login and takes no model — claude picks its own (use /model inside it)."
+        fi
+        write_active "$provider" "" "" "" "" "" "" "1"
+        write_defaults "$provider" ""
+        info "Switched to ${C_BOLD}${provider}${C_RESET} ${C_DIM}(native login — same as running claude directly)${C_RESET}"
+        printf '    Run %sccs%s to start claude with nothing injected\n' "${C_BOLD}" "${C_RESET}"
+        return
+    fi
+
     validate_api_key "$provider"
 
     local model base_url api_key opus haiku
@@ -601,7 +650,12 @@ cmd_list() {
         dm=$(get_cfg "$p" "model")
         if [ -z "$dm" ]; then dm=$(get_cfg "$p" "sonnet_model"); fi
         if [ -z "$dm" ]; then dm=$(get_cfg "$p" "default_model"); fi
-        if [ -n "$key" ]; then
+        if is_native "$p"; then
+            # No key to configure — it is always ready, and has no model of its own
+            status_text="native login"
+            status_color="$C_GREEN"
+            dm=""
+        elif [ -n "$key" ]; then
             status_text="configured"
             status_color="$C_GREEN"
         else
@@ -625,6 +679,17 @@ cmd_status() {
 
     printf "\n"
     printf '  %sProvider:%s  %s\n' "${C_BOLD}" "${C_RESET}" "$ACTIVE_PROVIDER"
+
+    # Native login: there is nothing to report but the fact itself — no model,
+    # no endpoint, no key, no window. Keep awake still applies, so still print it.
+    if [ -n "$ACTIVE_NATIVE" ]; then
+        printf '  %sMode:%s      %snative login (nothing injected — same as running claude)%s\n' \
+            "${C_BOLD}" "${C_RESET}" "${C_DIM}" "${C_RESET}"
+        caffeine_line
+        printf "\n"
+        return
+    fi
+
     printf '  %sModel:%s     %s\n' "${C_BOLD}" "${C_RESET}" "$ACTIVE_MODEL"
     if [ -n "$ACTIVE_BASE_URL" ]; then
         printf '  %sBase URL:%s  %s\n' "${C_BOLD}" "${C_RESET}" "$ACTIVE_BASE_URL"
@@ -784,6 +849,15 @@ caffeine_line() {
     fi
 }
 
+# A sleep assertion is a live process, not an env var — `ccs env` cannot carry
+# it. Say so on stderr so `eval "$(ccs env)"` keeps a clean stdout.
+caffeine_env_note() {
+    if [ "$(caffeine_mode)" != "off" ]; then
+        printf '%sccs caffeine is on, but env vars cannot keep a machine awake — launch with %sccs%s%s to get it.%s\n' \
+            "${C_DIM}" "${C_RESET}${C_BOLD}" "${C_RESET}" "${C_DIM}" "${C_RESET}" >&2
+    fi
+}
+
 caffeine_on() {
     local mode="${1:-system}"
     case "$mode" in
@@ -855,6 +929,32 @@ cmd_launch() {
     # Verify claude is available
     if ! command -v claude >/dev/null 2>&1; then
         die "claude command not found. Install Claude Code first."
+    fi
+
+    # Native login — claude exactly as it runs on its own: nothing set, and the
+    # vars ccs manages scrubbed so a stale `eval "$(ccs env)"` from another
+    # provider cannot survive into this session. The wrapper still applies:
+    # keeping the machine awake is about the machine, not about the provider.
+    if [ -n "$ACTIVE_NATIVE" ]; then
+        if [ -n "$CAFFEINE_CMD" ]; then
+            info "Launching claude ${C_DIM}(native login, caffeinated)${C_RESET}"
+        else
+            info "Launching claude ${C_DIM}(native login)${C_RESET}"
+        fi
+        # shellcheck disable=SC2086  # intentional: empty means "no wrapper"
+        exec env \
+            -u ANTHROPIC_API_KEY \
+            -u ANTHROPIC_AUTH_TOKEN \
+            -u ANTHROPIC_BASE_URL \
+            -u ANTHROPIC_MODEL \
+            -u ANTHROPIC_DEFAULT_OPUS_MODEL \
+            -u ANTHROPIC_DEFAULT_SONNET_MODEL \
+            -u ANTHROPIC_DEFAULT_HAIKU_MODEL \
+            -u CLAUDE_CODE_SUBAGENT_MODEL \
+            -u ANTHROPIC_SMALL_FAST_MODEL \
+            -u CLAUDE_CODE_MAX_CONTEXT_TOKENS \
+            -u CLAUDE_CODE_MAX_OUTPUT_TOKENS \
+            $CAFFEINE_CMD claude "$@"
     fi
 
     load_limits "$ACTIVE_PROVIDER" "$ACTIVE_MODEL" "$ACTIVE_BASE_URL"
@@ -933,6 +1033,24 @@ cmd_env() {
         2) validate_api_key "$(get_cfg "_defaults" "provider")" ;;
     esac
 
+    # Native login: the whole point is that nothing is set. Unset everything ccs
+    # manages so a previous eval of another provider cannot linger.
+    if [ -n "$ACTIVE_NATIVE" ]; then
+        printf 'unset ANTHROPIC_API_KEY 2>/dev/null || true\n'
+        printf 'unset ANTHROPIC_AUTH_TOKEN 2>/dev/null || true\n'
+        printf 'unset ANTHROPIC_BASE_URL 2>/dev/null || true\n'
+        printf 'unset ANTHROPIC_MODEL 2>/dev/null || true\n'
+        printf 'unset ANTHROPIC_DEFAULT_OPUS_MODEL 2>/dev/null || true\n'
+        printf 'unset ANTHROPIC_DEFAULT_SONNET_MODEL 2>/dev/null || true\n'
+        printf 'unset ANTHROPIC_DEFAULT_HAIKU_MODEL 2>/dev/null || true\n'
+        printf 'unset CLAUDE_CODE_SUBAGENT_MODEL 2>/dev/null || true\n'
+        printf 'unset ANTHROPIC_SMALL_FAST_MODEL 2>/dev/null || true\n'
+        printf 'unset CLAUDE_CODE_MAX_CONTEXT_TOKENS 2>/dev/null || true\n'
+        printf 'unset CLAUDE_CODE_MAX_OUTPUT_TOKENS 2>/dev/null || true\n'
+        caffeine_env_note
+        return
+    fi
+
     load_limits "$ACTIVE_PROVIDER" "$ACTIVE_MODEL" "$ACTIVE_BASE_URL"
 
     if [ -n "$ACTIVE_BASE_URL" ]; then
@@ -971,13 +1089,7 @@ cmd_env() {
         printf 'unset CLAUDE_CODE_MAX_OUTPUT_TOKENS 2>/dev/null || true\n'
     fi
     printf "export ANTHROPIC_MODEL='%s'\n" "$ACTIVE_MODEL"
-
-    # A sleep assertion is a live process, not an env var — `ccs env` cannot
-    # carry it. Say so on stderr so `eval "$(ccs env)"` stays clean.
-    if [ "$(caffeine_mode)" != "off" ]; then
-        printf '%sccs caffeine is on, but env vars cannot keep a machine awake — launch with %sccs%s%s to get it.%s\n' \
-            "${C_DIM}" "${C_RESET}${C_BOLD}" "${C_RESET}" "${C_DIM}" "${C_RESET}" >&2
-    fi
+    caffeine_env_note
 }
 
 cmd_help() {
@@ -1026,6 +1138,7 @@ ${C_BOLD}SYNC SUBCOMMANDS${C_RESET}
     sync off                    Forget the remote, touch no files
 
 ${C_BOLD}EXAMPLES${C_RESET}
+    ccs use claude                     Native login — claude exactly as it is
     ccs use zai                        Switch to Z.AI (saved as default)
     ccs                                Launch claude with active provider
     ccs use openrouter gpt-4o          Switch to OpenRouter with specific model
@@ -1039,6 +1152,17 @@ ${C_BOLD}EXAMPLES${C_RESET}
     ccs sync init --gist-new           Create a secret gist for your config
     ccs sync push                      Back it up
     ccs sync import <gist-url>         Rebuild a good install elsewhere
+
+${C_BOLD}NATIVE LOGIN${C_RESET}
+    'ccs use claude' selects the [claude] provider, which configures nothing:
+    no base URL, no key, no model. Launching through ccs is then exactly like
+    running claude — same subscription, same login — except ccs still wraps it,
+    so keep-awake and config sync work on your normal Claude account too.
+
+    [anthropic] is the other thing: native endpoint, but with your own API key.
+
+    Any config section can be one: put native=true in it, and every other key
+    in that section is ignored.
 
 ${C_BOLD}CONTEXT WINDOW${C_RESET}
     ccs sizes CLAUDE_CODE_MAX_CONTEXT_TOKENS from the model's real window, so
@@ -1119,6 +1243,16 @@ cmd_models() {
         1) die "No active provider and no default configured." ;;
         2) validate_api_key "$(get_cfg "_defaults" "provider")" ;;
     esac
+
+    # Native login: claude ships its own table for its own models and ccs sets
+    # no window at all, so there is nothing to look up or show.
+    if [ -n "$ACTIVE_NATIVE" ]; then
+        printf '\n  %sNative login%s — claude uses its own model table and ccs sets no window.\n' \
+            "${C_BOLD}" "${C_RESET}"
+        printf '  %sRun %sccs use <provider>%s for a provider whose window ccs has to size.%s\n\n' \
+            "${C_DIM}" "${C_RESET}${C_BOLD}" "${C_RESET}${C_DIM}" "${C_RESET}"
+        return
+    fi
 
     if ! have_llm_models; then
         warn "llm-models not found — windows fall back to whatever is pinned in the config"

@@ -9,6 +9,7 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 ## Features
 
 - **9 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, Custom
+- **Native login**: `ccs use claude` configures nothing at all — same account, same session as running `claude`, so keep-awake and sync work on your normal Claude subscription too
 - **Default model**: configurable globally and per provider
 - **Right-sized context window**: detects each model's real window so auto-compact stops assuming 200k
 - **Config backup & sync**: push `~/.claude` to a gist or private repo, restore it on any machine
@@ -50,6 +51,15 @@ add [`llm-models`](https://github.com/maxgfr/llm-models) for context-window sizi
 else works without them.
 
 ## Quick start
+
+Out of the box `ccs` is the native login: it launches `claude` untouched, on whatever account
+`claude` is already logged into — you just get keep-awake, sync and provider switching around it.
+
+```sh
+ccs --caffeine            # your usual Claude session, machine kept awake
+```
+
+To bring another provider in:
 
 ```sh
 # 1. Add your API keys
@@ -119,7 +129,8 @@ SYNC SUBCOMMANDS
 
 ```sh
 # Switch provider
-ccs use anthropic                     # Use default model (claude-sonnet-5)
+ccs use claude                        # Native login — exactly like running claude
+ccs use anthropic                     # Native endpoint, with your own API key
 ccs use anthropic claude-opus-4-6     # Override model
 ccs use openrouter openai/gpt-4o     # OpenRouter with specific model
 ccs use deepseek deepseek-reasoner   # DeepSeek R1
@@ -146,10 +157,12 @@ eval "$(ccs env)"                     # Export env vars to current session
 ## Providers
 
 All providers expose an Anthropic-compatible Messages API endpoint, confirmed working with Claude Code.
+`claude` is the exception and the default: it is not an endpoint at all, just claude as it already runs.
 
 | Provider     | Base URL                                                  | Default Model                    |
 |--------------|-----------------------------------------------------------|----------------------------------|
-| `anthropic`  | *(native — no override)*                                  | `claude-sonnet-5`              |
+| `claude`     | *(nothing injected — claude's own login)*                 | *(claude's own default)*         |
+| `anthropic`  | *(native endpoint, your API key)*                         | `claude-sonnet-5`              |
 | `openrouter` | `https://openrouter.ai/api`                               | `anthropic/claude-sonnet-4`      |
 | `deepseek`   | `https://api.deepseek.com/anthropic`                      | `deepseek-chat`                  |
 | `zai`        | `https://api.z.ai/api/anthropic`                          | `glm-5.1`                        |
@@ -158,6 +171,34 @@ All providers expose an Anthropic-compatible Messages API endpoint, confirmed wo
 | `minimax`    | `https://api.minimax.io/anthropic`                        | `MiniMax-M2.7`                   |
 | `doubao`     | `https://ark.cn-beijing.volces.com/api/coding`            | `doubao-seed-code-preview-latest`|
 | `custom`     | *(user-defined)*                                          | *(user-defined)*                 |
+
+### Native login (`claude`)
+
+`claude` is the default and the odd one out: it configures **nothing**. No base URL, no key, no
+model, no context window — `ccs` exports not a single variable and simply runs `claude`, on
+whatever account it is already logged into.
+
+```sh
+ccs use claude       # back to your normal Claude session
+ccs --caffeine       # ...with the machine kept awake
+```
+
+That is the point: everything `ccs` wraps around the launch — keep awake, config sync, argument
+passthrough — now works on a Claude subscription, not just on API keys. Switching to a provider and
+back is one command each way.
+
+It is stricter than plain `claude` on one point: the `ANTHROPIC_*` and `CLAUDE_CODE_*` variables
+`ccs` manages are scrubbed from the environment first, so a stale `eval "$(ccs env)"` for another
+provider cannot quietly survive into the session.
+
+Don't confuse it with `anthropic`, which is the Anthropic endpoint **with your own API key**.
+
+Any section can be a native login — `native=true` makes every other key in it irrelevant:
+
+```ini
+[claude]
+native=true
+```
 
 ### Z.AI Coding Plan
 
@@ -191,9 +232,13 @@ Located at `~/.claude-provider/config`. Simple INI format, editable by hand:
 
 ```ini
 [_defaults]
-provider=anthropic
-model=claude-sonnet-5
+provider=claude
+model=
 caffeine=off
+
+# Native login — nothing is injected, claude runs on its own account
+[claude]
+native=true
 
 [anthropic]
 base_url=
@@ -216,6 +261,8 @@ haiku_model=glm-4.7
 - **`[_defaults]`** — global default provider and model
 - **`api_key=`** — empty means not configured
 - **`base_url=`** — empty for `[anthropic]` uses native Anthropic API (no `ANTHROPIC_BASE_URL`)
+- **`native=`** — `true` makes the section the native login: ccs exports nothing and every other key
+  in that section is ignored. That is what `[claude]` is
 - **`model=`** — main model (maps to sonnet/default tier in `/models`)
 - **`opus_model=`** — optional, for `/models` opus tier (falls back to `model`)
 - **`haiku_model=`** — optional, for `/models` haiku tier + fast tasks (falls back to `model`)
@@ -514,6 +561,7 @@ ccs() {
 ```
 claude          → normal Claude Code, no ccs involvement
 ccs             → Claude Code with provider env vars (scoped to that process)
+ccs use claude  → ...and with no env vars at all: normal Claude Code, wrapped
 ```
 
 `ccs` also **scrubs conflicting inherited vars** (`env -u`) before launching: a stale `ANTHROPIC_BASE_URL` or tier model left in your shell by a previous `eval "$(ccs env)"` for another provider can't leak into the launch. Likewise, `eval "$(ccs env)"` for native Anthropic unsets the third-party tier vars it may have exported before.
@@ -521,6 +569,9 @@ ccs             → Claude Code with provider env vars (scoped to that process)
 If **no provider is configured at all** (no active provider, no API key in the defaults), `ccs` warns and launches vanilla `claude` instead of failing.
 
 With `ccs caffeine` on, the keep-awake tool is spliced into that same `exec`, between `env` and `claude` — `exec env ... caffeinate -ims claude ...` — so the sleep assertion is scoped to the claude process exactly like the env vars are, and claude's exit status still reaches your shell.
+
+On the native login (`ccs use claude`) every variable in the table below is **unset**, not set:
+that branch of the `exec` is nothing but `env -u ... claude`, plus the keep-awake wrapper.
 
 | Variable                      | When                                                 |
 |-------------------------------|------------------------------------------------------|
