@@ -739,13 +739,16 @@ write_defaults() {
 # inserted between `env` and `claude` in cmd_launch.
 
 # The effective mode: --caffeine/--no-caffeine first, then [_defaults] caffeine=.
-# parse_config runs here because load_state returns early — without ever parsing
-# the config — whenever an active state file exists, which would make a
-# configured caffeine= read as empty.
+# parse_config runs here (once — the guard is the same one load_limits and
+# load_sync_cfg use) because load_state returns early, without ever parsing the
+# config, whenever an active state file exists, which would make a configured
+# caffeine= read as empty.
 caffeine_mode() {
     local mode="$CAFFEINE_OVERRIDE"
     if [ -z "$mode" ]; then
-        parse_config || true
+        if [ -z "${PROVIDERS+x}" ]; then
+            parse_config || true
+        fi
         mode=$(get_cfg "_defaults" "caffeine")
     fi
     case "$mode" in
