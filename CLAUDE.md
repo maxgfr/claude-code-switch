@@ -20,7 +20,10 @@
 ## Architecture
 
 - **Single script**: `ccs` (~2500 lines of POSIX sh)
-- **Config**: INI format at `~/.claude-provider/config`, parsed with shell builtins (`while read` + `case`)
+- **Config**: INI format at `~/.claude-provider/config`, parsed with shell builtins (`while read` +
+  `case` + parameter expansions). **No `sed`/`cut` in `parse_config`**: it runs on every launch and a
+  fork per line cost ~400 ms on a 100-line config. Spaces around `=` are trimmed, same rule as
+  `config_set`. `write_defaults` is one `awk` pass for the same reason
 - **State**: `~/.claude-provider/active` stores current provider/model, plus `NATIVE=` for the
   native login (removed by `ccs reset`)
 - **Model cache**: `~/.claude-provider/models-cache` stores resolved context windows (survives

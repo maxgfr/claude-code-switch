@@ -95,25 +95,27 @@ parse_config() {
         return 1
     fi
 
-    local current_section=""
+    local current_section="" line key value
     PROVIDERS=""
 
+    # Pure parameter expansions, no sed/cut: this runs on every launch and a
+    # fork per line made it the slowest thing ccs does by a wide margin.
     while IFS= read -r line || [ -n "$line" ]; do
         # Strip leading/trailing whitespace
-        line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        line=${line#"${line%%[![:space:]]*}"}
+        line=${line%"${line##*[![:space:]]}"}
 
-        # Skip empty lines and comments
         case "$line" in
+            # Empty lines and comments
             ""|\#*) continue ;;
-        esac
 
-        # Section header
-        case "$line" in
+            # Section header
             \[*\])
-                current_section=$(printf '%s' "$line" | sed 's/^\[//;s/\]$//')
+                current_section=${line#\[}
+                current_section=${current_section%\]}
                 # Validate section name
                 case "$current_section" in
-                    *[!a-zA-Z0-9_]*)
+                    ""|*[!a-zA-Z0-9_]*)
                         warn "Skipping invalid section name: $current_section"
                         current_section=""
                         ;;
@@ -126,25 +128,23 @@ parse_config() {
                         PROVIDERS="${PROVIDERS:+$PROVIDERS }$current_section"
                         ;;
                 esac
-                continue
+                ;;
+
+            # key=value pair — spaces around the = are allowed, as they are in
+            # config_set; the value keeps any further = it contains
+            *=*)
+                [ -n "$current_section" ] || continue
+                key=${line%%=*}
+                value=${line#*=}
+                key=${key%"${key##*[![:space:]]}"}
+                value=${value#"${value%%[![:space:]]*}"}
+                # Sanitize key
+                case "$key" in
+                    ""|*[!a-zA-Z0-9_]*) continue ;;
+                esac
+                eval "cfg_${current_section}_${key}=\"\$value\""
                 ;;
         esac
-
-        # Key=value pair
-        if [ -n "$current_section" ]; then
-            case "$line" in
-                *=*)
-                    local key value
-                    key=$(printf '%s' "$line" | cut -d= -f1)
-                    value=$(printf '%s' "$line" | cut -d= -f2-)
-                    # Sanitize key
-                    case "$key" in
-                        *[!a-zA-Z0-9_]*) continue ;;
-                    esac
-                    eval "cfg_${current_section}_${key}=\"\$value\""
-                    ;;
-            esac
-        fi
     done < "$CONFIG_FILE"
 }
 
@@ -715,43 +715,18 @@ cmd_config() {
     "${EDITOR:-vi}" "$CONFIG_FILE"
 }
 
+# Rewrite provider= and model= inside [_defaults] only — one awk pass, same
+# whitespace rules as config_set. Keys absent from the section are not added.
 write_defaults() {
-    local provider="$1" model="$2"
-    local tmpfile in_defaults
+    local provider="$1" model="$2" tmpfile
     tmpfile=$(mktemp)
-    in_defaults=0
-
-    while IFS= read -r line || [ -n "$line" ]; do
-        local stripped
-        stripped=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-        case "$stripped" in
-            "[_defaults]")
-                in_defaults=1
-                printf '%s\n' "$line" >> "$tmpfile"
-                continue
-                ;;
-            \[*\])
-                in_defaults=0
-                ;;
-        esac
-
-        if [ "$in_defaults" = "1" ]; then
-            case "$stripped" in
-                provider=*)
-                    printf 'provider=%s\n' "$provider" >> "$tmpfile"
-                    continue
-                    ;;
-                model=*)
-                    printf 'model=%s\n' "$model" >> "$tmpfile"
-                    continue
-                    ;;
-            esac
-        fi
-
-        printf '%s\n' "$line" >> "$tmpfile"
-    done < "$CONFIG_FILE"
-
+    awk -v p="$provider" -v m="$model" '
+        /^[ \t]*\[_defaults\][ \t]*$/     { in_d = 1; print; next }
+        /^[ \t]*\[/                       { in_d = 0; print; next }
+        in_d && /^[ \t]*provider[ \t]*=/  { print "provider=" p; next }
+        in_d && /^[ \t]*model[ \t]*=/     { print "model=" m; next }
+        { print }
+    ' "$CONFIG_FILE" > "$tmpfile"
     mv "$tmpfile" "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
 }

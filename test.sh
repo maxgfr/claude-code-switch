@@ -279,6 +279,25 @@ printf '\n[bad-name]\nbase_url=http://example.com\napi_key=test\nmodels=m1\ndefa
 assert_exit "hyphenated provider rejected" "1" "$CCS" use bad-name
 teardown
 
+# -- Config parsing: whitespace, = inside values, comments --
+printf '\033[1m[config parsing]\033[0m\n'
+setup
+CFG="$TEST_CONFIG_DIR/.claude-provider/config"
+printf '\n  [spaced]  \nbase_url = https://spaced.example/v1  \napi_key = spaced-key\n  model = glm=5.1\n# a comment inside the section\n\n[bad name]\napi_key=x\n' >> "$CFG"
+out=$("$CCS" use spaced 2>&1 || true)
+assert_contains "key = value with spaces resolves the model" "glm=5.1" "$out"
+out=$("$CCS" env 2>/dev/null || true)
+assert_contains "value keeps its inner = and loses outer spaces" "ANTHROPIC_BASE_URL='https://spaced.example/v1'" "$out"
+assert_contains "api key with spaces around = is read" "ANTHROPIC_AUTH_TOKEN='spaced-key'" "$out"
+assert_contains "section header with surrounding spaces is a provider" "spaced" "$("$CCS" list 2>/dev/null)"
+assert_contains "invalid section name is still reported" "Skipping invalid section name: bad name" "$("$CCS" list 2>&1)"
+assert_not_contains "invalid section is not a provider" "bad name" "$("$CCS" list 2>/dev/null)"
+config=$(cat "$CFG")
+assert_contains "use rewrites provider= in [_defaults]" "provider=spaced" "$config"
+assert_contains "use rewrites model= in [_defaults]" "model=glm=5.1" "$config"
+assert_contains "use leaves the provider section's model alone" "  model = glm=5.1" "$config"
+teardown
+
 # -- Unknown command --
 printf '\033[1m[unknown command]\033[0m\n'
 setup

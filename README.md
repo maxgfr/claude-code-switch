@@ -286,7 +286,8 @@ auto_hooks=false     # written by `ccs sync hooks on|off`
 prune=true           # a pull mirrors the remote; false only ever adds
 ```
 
-Values run to the end of the line, so no trailing comments.
+Values run to the end of the line, so no trailing comments. Spaces around `=` and around a
+section header are ignored (`model = glm-5.1` works); a value keeps any further `=` it contains.
 
 ## Context window
 
