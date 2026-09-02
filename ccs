@@ -346,7 +346,7 @@ validate_api_key() {
     local key
     key=$(get_cfg "$provider" "api_key")
     if [ -z "$key" ]; then
-        die "Provider '$provider' has no API key configured. Run: ccs config"
+        die "Provider '$provider' has no API key configured. Run: ccs config set $provider api_key"
     fi
 }
 
