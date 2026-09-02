@@ -399,6 +399,44 @@ assert_contains "a vanished provider says so" "no longer in the config" "$err"
 rm -rf "$SHIM_DIR"
 teardown
 
+# -- config get / set --
+printf '\033[1m[config set and get]\033[0m\n'
+setup
+CFG="$TEST_CONFIG_DIR/.claude-provider/config"
+out=$(EDITOR=/bin/cat "$CCS" config)
+assert_contains "config alone opens the file in EDITOR" "[_defaults]" "$out"
+"$CCS" config set zai api_key "set-key-1" >/dev/null 2>&1
+assert_eq "get returns what set wrote" "set-key-1" "$("$CCS" config get zai api_key)"
+assert_eq "get of an absent key prints nothing" "" "$("$CCS" config get zai nothing)"
+assert_exit "and still exits 0" "0" "$CCS" config get zai nothing
+"$CCS" config set newprov model "m1" >/dev/null 2>&1
+assert_contains "set creates a missing section" "[newprov]" "$(cat "$CFG")"
+assert_eq "and the key inside it" "m1" "$("$CCS" config get newprov model)"
+printf 'piped-key\n' | "$CCS" config set zai api_key >/dev/null 2>&1
+assert_eq "set without a value reads stdin" "piped-key" "$("$CCS" config get zai api_key)"
+"$CCS" config set zai api_key "" >/dev/null 2>&1
+assert_eq "an empty value blanks the key" "" "$("$CCS" config get zai api_key)"
+out=$("$CCS" config set zai api_key "secret-value-1234567" 2>&1)
+assert_not_contains "set never echoes a key back" "secret-value-1234567" "$out"
+assert_contains "but confirms the write" "api_key" "$out"
+"$CCS" config set _defaults caffeine display >/dev/null 2>&1
+assert_contains "reserved sections are writable" "on (display" "$("$CCS" caffeine status)"
+assert_exit "invalid section name rejected" "1" "$CCS" config set "bad name" k v
+assert_exit "invalid key name rejected" "1" "$CCS" config set zai "bad-key" v
+assert_exit "get needs section and key" "1" "$CCS" config get zai
+assert_exit "unknown subcommand rejected" "1" "$CCS" config bogus
+assert_eq "config file is still 600" "600" "$(stat -c '%a' "$CFG" 2>/dev/null || stat -f '%A' "$CFG" 2>/dev/null)"
+# A key set this way is live at the next launch — no `ccs use` needed
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+"$CCS" use zai >/dev/null 2>&1
+"$CCS" config set zai api_key "fresh-key" >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>/dev/null)
+assert_contains "a key set with config set is used at launch" "ANTHROPIC_AUTH_TOKEN=fresh-key" "$out"
+rm -rf "$SHIM_DIR"
+teardown
+
 # -- ccs -h / -v are ccs flags, not claude passthrough --
 printf '\033[1m[-h and -v flags]\033[0m\n'
 setup

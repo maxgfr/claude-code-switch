@@ -744,9 +744,67 @@ cmd_status() {
     printf "\n"
 }
 
+# Section and key names share the parser's alphabet: [a-zA-Z0-9_], non-empty
+valid_ident() {
+    case "${1:-}" in
+        ""|*[!a-zA-Z0-9_]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 cmd_config() {
-    require_config
-    "${EDITOR:-vi}" "$CONFIG_FILE"
+    local sub="${1:-}"
+    if [ $# -gt 0 ]; then shift; fi
+    case "$sub" in
+        "")
+            require_config
+            "${EDITOR:-vi}" "$CONFIG_FILE"
+            ;;
+        get) config_get_cmd "$@" ;;
+        set) config_set_cmd "$@" ;;
+        *) die "Unknown config subcommand '$sub'. Usage: ccs config [get <section> <key> | set <section> <key> [value]]" ;;
+    esac
+}
+
+config_get_cmd() {
+    [ $# -eq 2 ] || die "Usage: ccs config get <section> <key>"
+    if ! valid_ident "$1" || ! valid_ident "$2"; then
+        die "Section and key names may only contain letters, digits and _"
+    fi
+    parse_config || true
+    # Empty when absent, exit 0 either way: scripts test the value, not the exit
+    printf '%s\n' "$(get_cfg "$1" "$2")"
+}
+
+# `ccs config set <section> <key> [value]` — without a value the line is read
+# from stdin, with echo off when that is a terminal, so a key can be pasted
+# without landing in the shell history or in `ps`.
+config_set_cmd() {
+    [ $# -ge 2 ] && [ $# -le 3 ] || die "Usage: ccs config set <section> <key> [value]"
+    local section="$1" key="$2" value=""
+    if ! valid_ident "$section" || ! valid_ident "$key"; then
+        die "Section and key names may only contain letters, digits and _"
+    fi
+    if [ $# -eq 3 ]; then
+        value="$3"
+    elif [ -t 0 ]; then
+        printf 'Value for [%s] %s (hidden): ' "$section" "$key" >&2
+        trap 'stty echo 2>/dev/null; exit 130' INT
+        stty -echo 2>/dev/null || true
+        IFS= read -r value || true
+        stty echo 2>/dev/null || true
+        trap - INT
+        printf '\n' >&2
+    else
+        IFS= read -r value || true
+    fi
+    config_set "$section" "$key" "$value"
+    case "$key" in
+        *key*|*token*|*secret*)
+            info "Set [${section}] ${key} = $(mask_key "$value")" ;;
+        *)
+            info "Set [${section}] ${key} = ${value}" ;;
+    esac
 }
 
 # Rewrite provider= and model= inside [_defaults] only — one awk pass, same
@@ -1127,6 +1185,10 @@ ${C_BOLD}COMMANDS${C_RESET}
     list                        List configured providers
     status                      Show active provider and model
     config                      Open config file in \$EDITOR
+    config get <section> <key>  Print one config value (empty if unset)
+    config set <section> <key> [value]
+                                Set one value; no value = read it from stdin,
+                                hidden when that is a terminal
     launch [args...]            Launch claude with active provider env vars
     env                         Print export statements for current shell
     models [refresh|clear]      Show / refresh the context windows ccs will use
@@ -1156,6 +1218,7 @@ ${C_BOLD}EXAMPLES${C_RESET}
     ccs use zai                        Switch to Z.AI (saved as default)
     ccs                                Launch claude with active provider
     ccs use openrouter gpt-4o          Switch to OpenRouter with specific model
+    ccs config set zai api_key         Paste a key, hidden, no shell history
     ccs --print "hello"                Launch with extra claude flags
     eval "\$(ccs env)"                  Export vars to current shell
     ccs models                         Show the context window per model tier
@@ -2642,7 +2705,7 @@ main() {
             cmd_status
             ;;
         config|cfg)
-            cmd_config
+            cmd_config "$@"
             ;;
         launch|run)
             cmd_launch "$@"

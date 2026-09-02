@@ -100,6 +100,10 @@ COMMANDS
     list                        List configured providers
     status                      Show active provider and model
     config                      Open config file in $EDITOR
+    config get <section> <key>  Print one config value (empty if unset)
+    config set <section> <key> [value]
+                                Set one value; no value = read it from stdin,
+                                hidden when that is a terminal
     launch [args...]            Launch claude with active provider env vars
     env                         Print export statements for current shell
     models [refresh|clear]      Show / refresh the context windows ccs will use
@@ -288,6 +292,18 @@ prune=true           # a pull mirrors the remote; false only ever adds
 
 Values run to the end of the line, so no trailing comments. Spaces around `=` and around a
 section header are ignored (`model = glm-5.1` works); a value keeps any further `=` it contains.
+
+One value at a time, without opening the editor:
+
+```sh
+ccs config set zai api_key            # prompts for the value, hidden — no shell history
+ccs config set zai api_key < key.txt  # or pipe it in
+ccs config set _defaults caffeine display
+ccs config get zai model              # prints the value, empty if unset
+```
+
+`config set` creates the section when it is missing. An `api_key=` changed this way is live at the
+next launch: `ccs use` does not need to run again.
 
 ## Context window
 

@@ -116,6 +116,13 @@ test.sh             # Integration test suite (run in CI, hermetic: stubs llm-mod
 
 `ccs use|list|status|config|launch|env|models|notify|caffeine|sync|reset|purge|help|version`
 
+`ccs config` alone opens `$EDITOR`; `config get <section> <key>` prints one value (empty and exit 0
+when unset), `config set <section> <key> [value]` writes one through `config_set` (creating the
+section), reading the value from stdin when omitted — with `stty -echo` when stdin is a terminal,
+so a key never lands in shell history. Names are validated with the parser's alphabet
+(`valid_ident`). A key set this way is live at the next launch because `load_state` re-reads the
+config.
+
 Plus two launch flags consumed in `main()` before the generic `-*` passthrough: `--caffeine[=mode]`
 and `--no-caffeine`.
 
