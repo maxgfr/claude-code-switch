@@ -232,6 +232,20 @@ assert_contains "native unsets AUTH_TOKEN" "unset ANTHROPIC_AUTH_TOKEN" "$out"
 assert_not_contains "native does not export SMALL_FAST_MODEL" "export ANTHROPIC_SMALL_FAST_MODEL" "$out"
 teardown
 
+# -- Env output survives a single quote in a value --
+printf '\033[1m[env quoting]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+"$CCS" use zai >/dev/null 2>&1
+set_key zai api_key "sk-it's-x\$HOME\`id\`"
+out=$(sh -c 'eval "$('"$CCS"' env)"; printf %s "$ANTHROPIC_AUTH_TOKEN"')
+assert_eq "a quote in the key survives eval" "sk-it's-x\$HOME\`id\`" "$out"
+set_key zai model "glm'5"
+"$CCS" use zai >/dev/null 2>&1
+out=$(sh -c 'eval "$('"$CCS"' env)"; printf %s "$ANTHROPIC_MODEL"')
+assert_eq "a quote in the model survives eval" "glm'5" "$out"
+teardown
+
 # -- Use persists as default --
 printf '\033[1m[use persists default]\033[0m\n'
 setup

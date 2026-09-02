@@ -70,6 +70,21 @@ info() {
     printf '%s>>>%s %s\n' "${C_GREEN}" "${C_RESET}" "$*"
 }
 
+# Single-quote a string for `eval`: every ' becomes '\'' — builtins only
+sh_quote() {
+    local s="$1" out=""
+    while :; do
+        case "$s" in
+            *\'*)
+                out="${out}${s%%\'*}'\\''"
+                s=${s#*\'}
+                ;;
+            *) break ;;
+        esac
+    done
+    printf "'%s'" "${out}${s}"
+}
+
 mask_key() {
     local key="$1"
     local len
@@ -1050,16 +1065,18 @@ cmd_env() {
 
     load_limits "$ACTIVE_PROVIDER" "$ACTIVE_MODEL" "$ACTIVE_BASE_URL"
 
+    # Every value goes through sh_quote: a ' in a key or model name would
+    # otherwise break the eval on the other side.
     if [ -n "$ACTIVE_BASE_URL" ]; then
         # Third-party: ANTHROPIC_AUTH_TOKEN (no prompt), unset API_KEY
-        printf "export ANTHROPIC_BASE_URL='%s'\n" "$ACTIVE_BASE_URL"
-        printf "export ANTHROPIC_AUTH_TOKEN='%s'\n" "$ACTIVE_API_KEY"
+        printf 'export ANTHROPIC_BASE_URL=%s\n' "$(sh_quote "$ACTIVE_BASE_URL")"
+        printf 'export ANTHROPIC_AUTH_TOKEN=%s\n' "$(sh_quote "$ACTIVE_API_KEY")"
         printf 'unset ANTHROPIC_API_KEY 2>/dev/null || true\n'
-        printf "export ANTHROPIC_DEFAULT_OPUS_MODEL='%s'\n" "$ACTIVE_OPUS"
-        printf "export ANTHROPIC_DEFAULT_SONNET_MODEL='%s'\n" "$ACTIVE_SONNET"
-        printf "export ANTHROPIC_DEFAULT_HAIKU_MODEL='%s'\n" "$ACTIVE_HAIKU"
-        printf "export CLAUDE_CODE_SUBAGENT_MODEL='%s'\n" "$ACTIVE_SONNET"
-        printf "export ANTHROPIC_SMALL_FAST_MODEL='%s'\n" "$ACTIVE_HAIKU"
+        printf 'export ANTHROPIC_DEFAULT_OPUS_MODEL=%s\n' "$(sh_quote "$ACTIVE_OPUS")"
+        printf 'export ANTHROPIC_DEFAULT_SONNET_MODEL=%s\n' "$(sh_quote "$ACTIVE_SONNET")"
+        printf 'export ANTHROPIC_DEFAULT_HAIKU_MODEL=%s\n' "$(sh_quote "$ACTIVE_HAIKU")"
+        printf 'export CLAUDE_CODE_SUBAGENT_MODEL=%s\n' "$(sh_quote "$ACTIVE_SONNET")"
+        printf 'export ANTHROPIC_SMALL_FAST_MODEL=%s\n' "$(sh_quote "$ACTIVE_HAIKU")"
         if [ -n "$CTX_TOKENS" ]; then
             printf "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='%s'\n" "$CTX_TOKENS"
         else
@@ -1075,7 +1092,7 @@ cmd_env() {
         # Also unset the tier vars a previous third-party `eval $(ccs env)`
         # may have exported — otherwise claude keeps stale models.
         printf 'unset ANTHROPIC_BASE_URL 2>/dev/null || true\n'
-        printf "export ANTHROPIC_API_KEY='%s'\n" "$ACTIVE_API_KEY"
+        printf 'export ANTHROPIC_API_KEY=%s\n' "$(sh_quote "$ACTIVE_API_KEY")"
         printf 'unset ANTHROPIC_AUTH_TOKEN 2>/dev/null || true\n'
         printf 'unset ANTHROPIC_DEFAULT_OPUS_MODEL 2>/dev/null || true\n'
         printf 'unset ANTHROPIC_DEFAULT_SONNET_MODEL 2>/dev/null || true\n'
@@ -1085,7 +1102,7 @@ cmd_env() {
         printf 'unset CLAUDE_CODE_MAX_CONTEXT_TOKENS 2>/dev/null || true\n'
         printf 'unset CLAUDE_CODE_MAX_OUTPUT_TOKENS 2>/dev/null || true\n'
     fi
-    printf "export ANTHROPIC_MODEL='%s'\n" "$ACTIVE_MODEL"
+    printf 'export ANTHROPIC_MODEL=%s\n' "$(sh_quote "$ACTIVE_MODEL")"
     caffeine_env_note
 }
 
