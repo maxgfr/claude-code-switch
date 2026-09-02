@@ -421,6 +421,9 @@ assert_not_contains "set never echoes a key back" "secret-value-1234567" "$out"
 assert_contains "but confirms the write" "api_key" "$out"
 "$CCS" config set _defaults caffeine display >/dev/null 2>&1
 assert_contains "reserved sections are writable" "on (display" "$("$CCS" caffeine status)"
+# Back off before the real launch below: an ubuntu runner denies inhibitor
+# locks, so a caffeinated launch there fails on the wrapper, not on ccs
+"$CCS" config set _defaults caffeine off >/dev/null 2>&1
 assert_exit "invalid section name rejected" "1" "$CCS" config set "bad name" k v
 assert_exit "invalid key name rejected" "1" "$CCS" config set zai "bad-key" v
 assert_exit "get needs section and key" "1" "$CCS" config get zai

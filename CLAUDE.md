@@ -341,6 +341,11 @@ Automated via semantic-release on push to `main`:
 - The test matrix is `fail-fast` by default: a red shellcheck cancels the macOS job, which then
   reads as "failed" without having run. Check which step actually failed before hunting a
   macOS-specific bug
+- **A test that launches for real must leave `caffeine=off`.** The ubuntu runner denies inhibitor
+  locks to the `runner` user (no logind session, no polkit — the `keepawake` job says so), so
+  `systemd-inhibit … claude` exits non-zero and `set -e` kills the suite. macOS `caffeinate` works,
+  so this fails on CI only. Sections that turn caffeine on must turn it back off, or launch with
+  `caffeine_shims` on `PATH`
 
 - Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`
 - `printf` instead of `echo -n` (portability)
