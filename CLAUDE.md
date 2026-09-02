@@ -114,7 +114,15 @@ test.sh             # Integration test suite (run in CI, hermetic: stubs llm-mod
 
 ## Commands
 
-`ccs use|list|status|config|launch|with|env|models|notify|caffeine|relaunch|sync|doctor|reset|purge|help|version`
+`ccs use|list|status|config|launch|with|env|models|notify|caffeine|relaunch|sync|doctor|reset|purge|help|version|completion`
+
+`ccs completion bash|zsh` prints a **static** script (heredocs in `completion_bash` /
+`completion_zsh`). Commands and subcommands are spelled out from `$CCS_COMMANDS`; provider names
+are read from the config file by the script itself with `$CCS_SECTION_SED`, so completing never
+runs ccs. That sed excludes `_`-prefixed sections, which are offered only where a section is
+expected (`config get|set`). Both scripts skip leading launch flags before reading the command
+word. **When a command or subcommand is added, update both heredocs and `$CCS_COMMANDS`** — the
+test drives the bash function directly and checks every command word of `main()`.
 
 Plus four launch flags consumed in `main()` before the generic `-*` passthrough: `--caffeine[=mode]`,
 `--no-caffeine`, `--relaunch`, `--no-relaunch`.

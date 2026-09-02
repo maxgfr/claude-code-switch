@@ -120,6 +120,7 @@ COMMANDS
     purge                       Remove all ccs data (~/.claude-provider/)
     help                        Show help
     version                     Show version
+    completion bash|zsh         Print a completion script for your shell
 
 SYNC SUBCOMMANDS
     sync init --gist-new        Create a secret gist and use it (needs gh)
@@ -631,6 +632,17 @@ ccs() {
     fi
 }
 ```
+
+Tab completion for commands, subcommands and the providers in your config:
+
+```sh
+eval "$(ccs completion zsh)"     # ~/.zshrc, after compinit
+eval "$(ccs completion bash)"    # ~/.bashrc
+```
+
+The script is static: it reads provider names straight from `~/.claude-provider/config` and never
+runs `ccs` while you type. It completes the `ccs()` function above too, since it carries the same
+name.
 
 ## How it works
 

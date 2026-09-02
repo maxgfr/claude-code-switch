@@ -515,6 +515,46 @@ assert_contains "and a missing working copy is mentioned" "working copy" "$out"
 rm -rf "$SHIM_DIR" "$BARE_DIR"
 teardown
 
+# -- completion: static scripts, providers read from the config file --
+printf '\033[1m[completion]\033[0m\n'
+setup
+out=$("$CCS" completion bash)
+# shellcheck disable=SC2016  # expanded by the inner bash, on purpose
+assert_exit "bash completion is valid bash" "0" env BASH_SCRIPT="$out" bash -c 'bash -n <<< "$BASH_SCRIPT"'
+for c in use list status config launch with env models notify caffeine relaunch sync doctor reset purge help version completion; do
+    assert_eq "bash completion knows '$c'" "true" "$(printf '%s' "$out" | grep -qw -- "$c" && echo true || echo false)"
+done
+# shellcheck disable=SC2016  # a literal needle
+assert_not_contains "completion never invokes ccs" '$(ccs' "$out"
+assert_not_contains "completion never invokes ccs (backticks)" '`ccs' "$out"
+# Drive the bash function directly: providers come from the config file
+printf '\n[mine_x]\napi_key=k\nmodel=m\n' >> "$TEST_CONFIG_DIR/.claude-provider/config"
+comp() {  # <cword> <words...> → COMPREPLY
+    local n="$1"; shift
+    BASH_SCRIPT="$out" bash -c 'eval "$BASH_SCRIPT"; COMP_WORDS=("$@"); COMP_CWORD='"$n"'; _ccs; printf "%s\n" "${COMPREPLY[@]}"' _ "$@"
+}
+assert_contains "commands complete after ccs" "doctor" "$(comp 1 ccs d)"
+assert_contains "providers complete after use" "mine_x" "$(comp 2 ccs use mi)"
+assert_not_contains "reserved sections are not providers" "_sync" "$(comp 2 ccs use "")"
+assert_contains "providers complete after with" "zai" "$(comp 2 ccs with z)"
+assert_contains "config completes get/set" "set" "$(comp 2 ccs config s)"
+assert_contains "config set completes sections, reserved ones included" "_defaults" "$(comp 3 ccs config set _)"
+assert_contains "sync completes its subcommands" "push" "$(comp 2 ccs sync pu)"
+assert_contains "a leading launch flag is skipped" "zai" "$(comp 3 ccs --caffeine with z)"
+assert_contains "launch flags complete too" "--relaunch" "$(comp 1 ccs --rel)"
+if command -v zsh >/dev/null 2>&1; then
+    zout=$("$CCS" completion zsh)
+    # shellcheck disable=SC2016  # expanded by the inner zsh, on purpose
+    assert_exit "zsh completion is valid zsh" "0" env ZSH_SCRIPT="$zout" zsh -c 'zsh -n <<< "$ZSH_SCRIPT"'
+    assert_contains "zsh completion registers for ccs" "compdef _ccs ccs" "$zout"
+    assert_contains "zsh completion knows relaunch" "relaunch" "$zout"
+else
+    printf '  \033[33mSKIP\033[0m zsh not installed\n'
+fi
+assert_exit "unknown shell rejected" "1" "$CCS" completion fish
+assert_exit "completion needs a shell" "1" "$CCS" completion
+teardown
+
 # -- ccs -h / -v are ccs flags, not claude passthrough --
 printf '\033[1m[-h and -v flags]\033[0m\n'
 setup
