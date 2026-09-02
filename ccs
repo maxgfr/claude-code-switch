@@ -792,7 +792,9 @@ config_get_cmd() {
 # from stdin, with echo off when that is a terminal, so a key can be pasted
 # without landing in the shell history or in `ps`.
 config_set_cmd() {
-    [ $# -ge 2 ] && [ $# -le 3 ] || die "Usage: ccs config set <section> <key> [value]"
+    if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+        die "Usage: ccs config set <section> <key> [value]"
+    fi
     local section="$1" key="$2" value=""
     if ! valid_ident "$section" || ! valid_ident "$key"; then
         die "Section and key names may only contain letters, digits and _"

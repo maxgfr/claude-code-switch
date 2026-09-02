@@ -334,6 +334,14 @@ Automated via semantic-release on push to `main`:
 
 ## Conventions
 
+- **Never `A && B || C`.** ShellCheck 0.9/0.10 (what the ubuntu runner ships) report SC2015 there
+  and the CI step fails; 0.11 relaxed the heuristic, so a local run can pass while CI does not.
+  Write `if ! A || ! B; then C; fi`. To check against the CI version:
+  `docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 -s sh -e SC3043 ccs test.sh`
+- The test matrix is `fail-fast` by default: a red shellcheck cancels the macOS job, which then
+  reads as "failed" without having run. Check which step actually failed before hunting a
+  macOS-specific bug
+
 - Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`
 - `printf` instead of `echo -n` (portability)
 - `set -eu` for safety
