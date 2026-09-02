@@ -1221,6 +1221,134 @@ assert_contains "and still gets the provider env" "ANTHROPIC_AUTH_TOKEN=test-key
 rm -rf "$SHIM_DIR" "$CAFF_DIR"
 teardown
 
+# --- Relaunch after a usage limit -------------------------------------------
+# A fake claude that hits the limit exactly once: the first run prints the
+# message and exits 1, every later run prints RESUMED plus its arguments. Time
+# is frozen with CCS_RELAUNCH_NOW (test-only, like CCS_OSRELEASE) two seconds
+# before the reset, so the wait is real but short. Tests run with stdout on a
+# pipe, which is the tee path; the script(1) path needs a terminal.
+RL_DIR=""
+
+relaunch_shim() {  # <limit message>
+    RL_DIR=$(mktemp -d)
+    cat > "$RL_DIR/claude" <<SHIM
+#!/bin/sh
+if [ ! -f "$RL_DIR/ran" ]; then
+    : > "$RL_DIR/ran"
+    printf '%s\n' "$1"
+    exit 1
+fi
+echo "RESUMED:\$*"
+env | grep -E "^ANTHROPIC_" || true
+exit 0
+SHIM
+    chmod +x "$RL_DIR/claude"
+}
+
+# 2026-09-02 01:09:58 Europe/Berlin, two seconds before "resets 1:10am"
+RL_NOW_0110=1788304198
+# 2026-09-05 08:59:58 Europe/Berlin, two seconds before "resets Sep 5 at 9am"
+RL_NOW_SEP5=1788591598
+RL_MSG="You've hit your session limit · resets 1:10am (Europe/Berlin)"
+
+# -- Relaunch: the persistent toggle --
+printf '\033[1m[relaunch toggle]\033[0m\n'
+setup
+CFG="$TEST_CONFIG_DIR/.claude-provider/config"
+assert_contains "relaunch is off by default" "Relaunch:  off" "$("$CCS" relaunch status)"
+"$CCS" relaunch on >/dev/null 2>&1
+assert_contains "on writes relaunch=on" "relaunch=on" "$(cat "$CFG")"
+assert_contains "status reports it" "Relaunch:  on" "$("$CCS" relaunch status)"
+set_all_keys "test-key-123"
+"$CCS" use zai >/dev/null 2>&1
+assert_contains "ccs status shows the relaunch state" "Relaunch:  on" "$("$CCS" status)"
+"$CCS" relaunch off >/dev/null 2>&1
+assert_contains "off writes relaunch=off" "relaunch=off" "$(cat "$CFG")"
+assert_exit "invalid subcommand rejected" "1" "$CCS" relaunch badsub
+teardown
+
+# -- Relaunch: wait for the reset, then claude --continue --
+printf '\033[1m[relaunch after a usage limit]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+"$CCS" use zai >/dev/null 2>&1
+relaunch_shim "$RL_MSG"
+out=$(PATH="$RL_DIR:$PATH" CCS_RELAUNCH_NOW="$RL_NOW_0110" "$CCS" --relaunch -p hi 2>&1)
+assert_contains "the limit is noticed and the reset time read" "relaunching at 1:10am (Europe/Berlin)" "$out"
+assert_contains "the wait is announced" "in 2s" "$out"
+assert_contains "claude is relaunched with --continue" "RESUMED:--continue -p hi" "$out"
+assert_contains "with the same provider env" "ANTHROPIC_AUTH_TOKEN=test-key-123" "$out"
+rm -f "$RL_DIR/ran"
+assert_exit "ccs exits with the relaunched claude's status" "0" \
+    env PATH="$RL_DIR:$PATH" CCS_RELAUNCH_NOW="$RL_NOW_0110" "$CCS" --relaunch -p hi
+rm -rf "$RL_DIR"
+# The weekly wording carries a date
+relaunch_shim "You've hit your weekly limit · resets Sep 5 at 9am (Europe/Berlin)"
+out=$(PATH="$RL_DIR:$PATH" CCS_RELAUNCH_NOW="$RL_NOW_SEP5" "$CCS" --relaunch 2>&1)
+assert_contains "a dated reset is read too" "relaunching at Sep 5 at 9am (Europe/Berlin)" "$out"
+assert_contains "and relaunched" "RESUMED:--continue" "$out"
+rm -rf "$RL_DIR"
+# A time mentioned earlier in the output must not be mistaken for the reset
+relaunch_shim "meeting at 3pm today
+$RL_MSG"
+out=$(PATH="$RL_DIR:$PATH" CCS_RELAUNCH_NOW="$RL_NOW_0110" "$CCS" --relaunch 2>&1)
+assert_contains "only the text after 'resets' is parsed" "relaunching at 1:10am" "$out"
+rm -rf "$RL_DIR"
+# Already resuming: no second --continue
+relaunch_shim "$RL_MSG"
+out=$(PATH="$RL_DIR:$PATH" CCS_RELAUNCH_NOW="$RL_NOW_0110" "$CCS" --relaunch --continue 2>&1)
+assert_eq "no duplicate --continue" "RESUMED:--continue" "$(printf '%s\n' "$out" | grep RESUMED)"
+rm -rf "$RL_DIR"
+# The config toggle works without the flag, and the flag can turn it off
+"$CCS" relaunch on >/dev/null 2>&1
+relaunch_shim "$RL_MSG"
+out=$(PATH="$RL_DIR:$PATH" CCS_RELAUNCH_NOW="$RL_NOW_0110" "$CCS" -p hi 2>&1)
+assert_contains "relaunch=on in the config is enough" "RESUMED:--continue -p hi" "$out"
+rm -rf "$RL_DIR"
+relaunch_shim "$RL_MSG"
+out=$(PATH="$RL_DIR:$PATH" CCS_RELAUNCH_NOW="$RL_NOW_0110" "$CCS" --no-relaunch -p hi 2>&1 || true)
+assert_not_contains "--no-relaunch overrides the config" "RESUMED" "$out"
+assert_contains "and claude's output is untouched" "hit your session limit" "$out"
+rm -rf "$RL_DIR"
+"$CCS" relaunch off >/dev/null 2>&1
+# ccs with goes through the same path
+relaunch_shim "$RL_MSG"
+out=$(PATH="$RL_DIR:$PATH" CCS_RELAUNCH_NOW="$RL_NOW_0110" "$CCS" --relaunch with deepseek -p hi 2>&1)
+assert_contains "ccs with is relaunched too" "RESUMED:--continue -p hi" "$out"
+assert_contains "on the provider asked for" "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic" "$out"
+rm -rf "$RL_DIR"
+# The wait itself is caffeinated when caffeine is on
+caffeine_shims
+relaunch_shim "$RL_MSG"
+out=$(PATH="$RL_DIR:$CAFF_DIR:$PATH" CCS_RELAUNCH_NOW="$RL_NOW_0110" "$CCS" --relaunch --caffeine -p hi 2>&1)
+n=$(printf '%s\n' "$out" | grep -c CAFFEINE_ARGS || true)
+assert_eq "the wait is wrapped by the keep-awake tool as well as claude" "true" \
+    "$([ "$n" -ge 3 ] && echo true || echo false)"
+assert_contains "and claude still comes back" "RESUMED:--continue" "$out"
+rm -rf "$RL_DIR" "$CAFF_DIR"
+teardown
+
+# -- Relaunch: when there is nothing to wait for --
+printf '\033[1m[relaunch passthrough]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+"$CCS" use zai >/dev/null 2>&1
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\necho OUT\necho ERR >&2\nexit 3\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" --relaunch 2>/dev/null || true)
+assert_contains "stdout reaches stdout" "OUT" "$out"
+assert_not_contains "stderr is kept apart from it" "ERR" "$out"
+err=$(PATH="$SHIM_DIR:$PATH" "$CCS" --relaunch 2>&1 >/dev/null || true)
+assert_contains "stderr reaches stderr" "ERR" "$err"
+assert_exit "claude's exit status passes through" "3" env PATH="$SHIM_DIR:$PATH" "$CCS" --relaunch
+printf '#!/bin/sh\necho "You have hit your session limit · resets soon"\nexit 1\n' > "$SHIM_DIR/claude"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" --relaunch 2>&1 || true)
+assert_contains "an unreadable reset time is reported" "could not be read" "$out"
+assert_exit "and the status still passes through" "1" env PATH="$SHIM_DIR:$PATH" "$CCS" --relaunch
+rm -rf "$SHIM_DIR"
+teardown
+
 # --- Sync helpers ---------------------------------------------------------
 # The whole sync suite runs against a bare repo on disk reached over file://,
 # so it never touches the network and never needs gh. git identity is written

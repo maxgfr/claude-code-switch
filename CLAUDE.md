@@ -114,7 +114,10 @@ test.sh             # Integration test suite (run in CI, hermetic: stubs llm-mod
 
 ## Commands
 
-`ccs use|list|status|config|launch|with|env|models|notify|caffeine|sync|doctor|reset|purge|help|version`
+`ccs use|list|status|config|launch|with|env|models|notify|caffeine|relaunch|sync|doctor|reset|purge|help|version`
+
+Plus four launch flags consumed in `main()` before the generic `-*` passthrough: `--caffeine[=mode]`,
+`--no-caffeine`, `--relaunch`, `--no-relaunch`.
 
 `ccs with <provider>[/<model>] [args…]` is a one-off launch: `launch_prepare` (sync + caffeine,
 shared with `cmd_launch`) then `parse_config` + `validate_provider` + `resolve_provider` +
@@ -130,15 +133,13 @@ so a key never lands in shell history. Names are validated with the parser's alp
 (`valid_ident`). A key set this way is live at the next launch because `load_state` re-reads the
 config.
 
-Plus two launch flags consumed in `main()` before the generic `-*` passthrough: `--caffeine[=mode]`
-and `--no-caffeine`.
-
 ## Keep awake (`ccs caffeine`)
 
-- The whole feature is **one command prefix** spliced into `cmd_launch`'s `exec`, between `env` and
+- The whole feature is **one command prefix** spliced into the launch's `exec`, between `env` and
   `claude`. `exec` is what makes it correct: the assertion is scoped to the claude process, it is
   released on exit/crash/signal, and claude's exit status still reaches the shell (verified:
-  `caffeinate -i sh -c 'exit 3'` → 3)
+  `caffeinate -i sh -c 'exit 3'` → 3). The `exec` itself now lives in `launch_run`, the single
+  choke point every launch goes through (see Relaunch below); with relaunch off it is a plain `exec`
 - `CAFFEINE_CMD` is spliced **unquoted**, same trick as `$ctx_env $out_env`. That is only safe
   because every word in it is space-free by construction — `--why=ccs-session`, never
   `--why="ccs session"`. Any future flag with a spaced value would silently word-split; put it in
@@ -183,6 +184,45 @@ and `--no-caffeine`.
   process is alive (`sleep` without `idle` in system mode, `sleep:idle` in display mode) and to be
   gone afterwards. It probes the runner's own ability to inhibit first, so a runner limitation
   never reads as a ccs pass
+
+## Relaunch after the usage limit (`ccs relaunch`)
+
+- **`launch_run` is the choke point.** The four `exec … claude` sites (vanilla, native, third-party,
+  Anthropic) call `launch_run <cmd…>` instead; off means `exec "$@"`, byte-for-byte the old
+  behaviour. On, `relaunch_loop` runs the command as a child, and only returns (to the `exec`) when
+  a tty is needed and `script(1)` is missing
+- **Recording**: on a terminal, `script(1)` gives the TUI a real pty — positional form on
+  Darwin/BSD, `-c "<string>"` on util-linux/busybox with `SHELL=/bin/sh` pinned and every word
+  through `sh_quote`. On a pipe, stdout and stderr each go through their own `tee` (fd 3/4
+  juggling) so `-p` consumers still see them apart. Claude's exit status comes back through a file
+  named by `CCS_RELAUNCH_STATUS`, because neither wrapper is trusted to relay it, and the pipe-side
+  subshell runs `set +e` or a non-zero claude leaves before writing it. The log is a temp file
+  removed right after it is read
+- **Detection** (`relaunch_detect`): last line matching `limit.*reset` after stripping CR and ANSI,
+  then only the text **after the last "reset"** is parsed — a "3pm" in the conversation must not win.
+  Returns 1 = no limit message (exit with claude's status), 2 = message but no readable time (warn,
+  then exit with the status). Clock `H[:MM]am|pm`, optional `Mon D` (weekly wording), optional
+  `(Area/City)` zone
+- **Date maths** (`relaunch_target`): BSD forms first — `date -r`, `date -j -f` — GNU `-d` second,
+  because GNU `-d` on BSD would try to set the kernel DST flag. Seconds are pinned to `:00`: BSD
+  `-j` fills any field absent from the format with the current time (found the hard way).
+  `env ${tz:+"TZ=$tz"}` because `TZ=""` means UTC, not local. A past time rolls to the next day
+  (or next year with a date). `CCS_RELAUNCH_NOW` freezes "now" **for the test suite only**, same
+  contract as `CCS_OSRELEASE`
+- **Wait** (`relaunch_wait`): 30 s chunks, each one `$CAFFEINE_CMD sleep N` — the wait is exactly
+  when the machine must not sleep, so it is wrapped like claude is. Off, ccs warns that the wait
+  sleeps with the machine
+- **Relaunch args**: `--continue` is inserted right after the first `claude` word by rotating `"$@"`
+  (`set -- "$@" "$w"`), skipped when `-c|--continue|-r|--resume` already follows `claude`. The
+  original arguments are kept, so a `-p "task"` is re-sent into the continued conversation
+- Interactive claude does **not** exit on the limit: the user quits, ccs sees the message in the
+  recording. `-p` is fully automatic
+- `test.sh` covers the tee path only (no tty on CI): a shim that hits the limit once, both wordings,
+  the after-"reset" rule, no duplicate `--continue`, status passthrough, stream separation, and the
+  caffeinated wait. The `script(1)` path was checked by hand on macOS by running ccs under an outer
+  `script` (the shim saw a tty and `RESUMED:--continue` came back)
+- **Not a third exception to the zero-interference principle**: it writes `[_defaults] relaunch=`
+  only, never `~/.claude`
 
 ## Config sync (`ccs sync`)
 

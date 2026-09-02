@@ -26,6 +26,14 @@ CAFFEINE_OVERRIDE=""                          # --caffeine / --no-caffeine, beat
 # WSL branch from a runner that is not WSL — there is no reason to set it.
 CCS_OSRELEASE="${CCS_OSRELEASE:-/proc/sys/kernel/osrelease}"
 
+# --- Relaunch state (see `ccs relaunch`) ---
+RELAUNCH_OVERRIDE=""                          # --relaunch / --no-relaunch, beats the config
+RELAUNCH_STATUS=0                             # exit status of the last captured claude run
+RELAUNCH_LOG=""                               # where that run's output was recorded
+# "Now" for the reset-time maths. Overridable only so the test suite can wait
+# two seconds instead of until 1:10am — there is no reason to set it.
+CCS_RELAUNCH_NOW="${CCS_RELAUNCH_NOW:-}"
+
 # --- Sync constants ---
 SYNC_DIR="${CONFIG_DIR}/sync"                 # git working copy mirroring the remote
 SYNC_BACKUP_DIR="${CONFIG_DIR}/sync-backup"   # ~/.claude snapshots, one per apply
@@ -236,6 +244,7 @@ provider=claude
 model=
 auto_context=true
 caffeine=off
+relaunch=off
 
 [_sync]
 remote=
@@ -720,6 +729,7 @@ cmd_status() {
         printf '  %sMode:%s      %snative login (nothing injected — same as running claude)%s\n' \
             "${C_BOLD}" "${C_RESET}" "${C_DIM}" "${C_RESET}"
         caffeine_line
+        relaunch_line
         printf "\n"
         return
     fi
@@ -739,8 +749,10 @@ cmd_status() {
         printf '  %sContext:%s   %sunknown (%s)%s\n' "${C_BOLD}" "${C_RESET}" \
             "${C_DIM}" "$CTX_SOURCE" "${C_RESET}"
     fi
-    # Caffeine belongs here, unlike notify/sync: it changes what a launch does.
+    # Caffeine and relaunch belong here, unlike notify/sync: they change what
+    # a launch does.
     caffeine_line
+    relaunch_line
     printf "\n"
 }
 
@@ -969,6 +981,295 @@ cmd_caffeine() {
     esac
 }
 
+# --- Relaunch after a usage limit ---
+# `ccs relaunch on` (or --relaunch) keeps ccs alive as claude's parent instead
+# of exec'ing it. Claude's output is recorded — through script(1) on a
+# terminal, so the TUI keeps a real tty, or through tee when stdout is a pipe
+# (-p mode) — and when the session ends on a "You've hit your … limit · resets
+# 1:10am (Europe/Berlin)" message, ccs waits until that time and runs claude
+# again with --continue, same provider, same arguments. In interactive mode
+# that means: hit the limit, quit claude, ccs takes it from there. Nothing is
+# written anywhere; the recording is a temp file removed as soon as it is read.
+
+relaunch_mode() {
+    local mode="$RELAUNCH_OVERRIDE"
+    if [ -z "$mode" ]; then
+        if [ -z "${PROVIDERS+x}" ]; then
+            parse_config || true
+        fi
+        mode=$(get_cfg "_defaults" "relaunch")
+    fi
+    case "$mode" in
+        on|true)      printf 'on' ;;
+        ""|off|false) printf 'off' ;;
+        *)
+            warn "unknown relaunch mode '$mode' — treating it as off (use on or off)"
+            printf 'off'
+            ;;
+    esac
+}
+
+relaunch_line() {
+    if [ "$(relaunch_mode)" = "on" ]; then
+        printf '  %sRelaunch:%s  on %s(claude --continue once the usage limit resets)%s\n' \
+            "${C_BOLD}" "${C_RESET}" "${C_DIM}" "${C_RESET}"
+    else
+        printf '  %sRelaunch:%s  off\n' "${C_BOLD}" "${C_RESET}"
+    fi
+}
+
+relaunch_on() {
+    config_set "_defaults" "relaunch" "on"
+    info "Relaunch on — when a session ends on the usage limit, ccs waits for the reset and runs claude --continue"
+    printf '    Interactive: quit claude after the limit message, ccs takes over. -p: automatic.\n'
+    if [ -t 1 ] && ! command -v script >/dev/null 2>&1; then
+        warn "script(1) not found — only piped (-p) sessions can be watched on this system"
+    fi
+}
+
+relaunch_off() {
+    config_set "_defaults" "relaunch" "off"
+    info "Relaunch off — claude exits on the usage limit and ccs with it"
+}
+
+cmd_relaunch() {
+    local sub="${1:-status}"
+    case "$sub" in
+        on)     relaunch_on ;;
+        off)    relaunch_off ;;
+        status) printf '\n'; relaunch_line; printf '\n' ;;
+        *)      die "Unknown relaunch subcommand '$sub'. Usage: ccs relaunch on|off|status" ;;
+    esac
+}
+
+# Epoch → formatted, in $tz when given (empty means local time). BSD -r first;
+# GNU -d @. `env ${tz:+…}` because TZ="" would mean UTC, not "unset".
+date_at() {
+    local epoch="$1" fmt="$2" tz="${3:-}"
+    env ${tz:+"TZ=$tz"} date -r "$epoch" "+$fmt" 2>/dev/null || \
+        env ${tz:+"TZ=$tz"} date -d "@$epoch" "+$fmt" 2>/dev/null
+}
+
+# "YYYY-MM-DD HH:MM" in $tz → epoch. Seconds are pinned to :00 because BSD
+# date -j fills any field absent from the format with the current time.
+date_to_epoch() {
+    local when="$1:00" tz="${2:-}"
+    env ${tz:+"TZ=$tz"} date -j -f '%Y-%m-%d %H:%M:%S' "$when" +%s 2>/dev/null || \
+        env ${tz:+"TZ=$tz"} date -d "$when" +%s 2>/dev/null
+}
+
+relaunch_now() {
+    if [ -n "$CCS_RELAUNCH_NOW" ]; then
+        printf '%s' "$CCS_RELAUNCH_NOW"
+    else
+        date +%s
+    fi
+}
+
+fmt_duration() {
+    local s="$1"
+    if [ "$s" -ge 3600 ]; then
+        printf '%dh %02dm' $((s / 3600)) $((s % 3600 / 60))
+    elif [ "$s" -ge 60 ]; then
+        printf '%dm %02ds' $((s / 60)) $((s % 60))
+    else
+        printf '%ds' "$s"
+    fi
+}
+
+# Find the last usage-limit message in a recording. Prints "clock|date|tz"
+# — "1:10am||Europe/Berlin", or "9am|Sep 5|Europe/Berlin" for the weekly
+# wording. Returns 1 when claude did not end on one, 2 when it did but the
+# reset time could not be read. Only what follows the last "reset" is
+# inspected, so a time mentioned in the conversation cannot be mistaken for
+# the reset.
+relaunch_detect() {
+    local esc line tail clock mdate tz
+    esc=$(printf '\033')
+    line=$(tr -d '\r' < "$1" | sed "s/${esc}\\[[0-9;?]*[A-Za-z]//g" | grep -iE 'limit.*reset' | tail -n 1) || true
+    [ -n "$line" ] || return 1
+    tail=$(printf '%s' "$line" | sed 's/.*[Rr]eset//')
+    clock=$(printf '%s' "$tail" | grep -oE '[0-9]{1,2}(:[0-9]{2})? ?[aApP][mM]' | head -n 1 | tr -d ' ' | tr 'APM' 'apm') || true
+    [ -n "$clock" ] || return 2
+    mdate=$(printf '%s' "$tail" | grep -oE '(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* [0-9]{1,2}' | head -n 1) || true
+    tz=$(printf '%s' "$tail" | grep -oE '\([A-Za-z_]+/[A-Za-z_/+-]+\)' | head -n 1 | tr -d '()') || true
+    printf '%s|%s|%s' "$clock" "$mdate" "$tz"
+}
+
+# <clock> <date-or-empty> <tz-or-empty> <now> → the epoch of the next such
+# wall-clock time in that zone, or 1 when date(1) will not compute it.
+relaunch_target() {
+    local clock="$1" mdate="$2" tz="$3" now="$4" hm h m ampm y mon d ymd t=""
+    ampm=${clock#"${clock%??}"}
+    hm=${clock%??}
+    case "$hm" in
+        *:*) h=${hm%%:*}; m=${hm#*:} ;;
+        *)   h=$hm; m=0 ;;
+    esac
+    h=${h#0}; [ -n "$h" ] || h=0
+    m=${m#0}; [ -n "$m" ] || m=0
+    if [ "$ampm" = "pm" ] && [ "$h" -lt 12 ]; then h=$((h + 12)); fi
+    if [ "$ampm" = "am" ] && [ "$h" -eq 12 ]; then h=0; fi
+    if [ -n "$mdate" ]; then
+        case "${mdate%% *}" in
+            Jan*) mon=1 ;; Feb*) mon=2 ;; Mar*) mon=3 ;; Apr*) mon=4 ;;
+            May*) mon=5 ;; Jun*) mon=6 ;; Jul*) mon=7 ;; Aug*) mon=8 ;;
+            Sep*) mon=9 ;; Oct*) mon=10 ;; Nov*) mon=11 ;; Dec*) mon=12 ;;
+            *) return 1 ;;
+        esac
+        d=${mdate#* }; d=${d#0}
+        y=$(date_at "$now" %Y "$tz") || return 1
+        t=$(date_to_epoch "$(printf '%s-%02d-%02d %02d:%02d' "$y" "$mon" "$d" "$h" "$m")" "$tz") || return 1
+        if [ "$t" -le "$now" ]; then
+            t=$(date_to_epoch "$(printf '%s-%02d-%02d %02d:%02d' $((y + 1)) "$mon" "$d" "$h" "$m")" "$tz") || return 1
+        fi
+    else
+        ymd=$(date_at "$now" %Y-%m-%d "$tz") || return 1
+        t=$(date_to_epoch "$(printf '%s %02d:%02d' "$ymd" "$h" "$m")" "$tz") || return 1
+        if [ "$t" -le "$now" ]; then
+            ymd=$(date_at $((now + 86400)) %Y-%m-%d "$tz") || return 1
+            t=$(date_to_epoch "$(printf '%s %02d:%02d' "$ymd" "$h" "$m")" "$tz") || return 1
+        fi
+    fi
+    is_uint "$t" || return 1
+    printf '%s' "$t"
+}
+
+# Sleep until $1 (epoch), in chunks, each one wrapped by the keep-awake tool
+# when caffeine is on — the wait is exactly when the machine must not sleep.
+relaunch_wait() {
+    local target="$1" now rem chunk
+    now=$(relaunch_now)
+    rem=$((target - now))
+    while [ "$rem" -gt 0 ]; do
+        chunk="$rem"
+        [ "$chunk" -le 30 ] || chunk=30
+        # shellcheck disable=SC2086  # intentional: empty means "no wrapper"
+        $CAFFEINE_CMD sleep "$chunk"
+        if [ -n "$CCS_RELAUNCH_NOW" ]; then
+            now=$((now + chunk))
+        else
+            now=$(date +%s)
+        fi
+        rem=$((target - now))
+    done
+}
+
+# Run "$@" (env … claude args) recording everything it prints into
+# $RELAUNCH_LOG, and leave its exit status in $RELAUNCH_STATUS. On a terminal
+# script(1) provides the tty the TUI needs; on a pipe, stdout and stderr each
+# go through their own tee so the caller still sees them apart. The status
+# comes back through a file because neither wrapper is trusted to relay it.
+relaunch_capture() {
+    local st q w
+    st=$(mktemp)
+    CCS_RELAUNCH_STATUS="$st"
+    export CCS_RELAUNCH_STATUS
+    if [ -t 1 ]; then
+        case "$(uname -s 2>/dev/null || printf 'unknown')" in
+            Darwin|*BSD*)
+                # shellcheck disable=SC2016  # the inner sh expands these, not this one
+                script -q "$RELAUNCH_LOG" sh -c '"$@"; echo $? >"$CCS_RELAUNCH_STATUS"' ccs "$@" || true
+                ;;
+            *)
+                # util-linux takes one -c string, run by $SHELL: pin sh and quote every word
+                # shellcheck disable=SC2016  # same: expanded by the inner sh
+                q='sh -c '"'"'"$@"; echo $? >"$CCS_RELAUNCH_STATUS"'"'"' ccs'
+                for w in "$@"; do q="$q $(sh_quote "$w")"; done
+                SHELL=/bin/sh script -q -c "$q" "$RELAUNCH_LOG" || true
+                ;;
+        esac
+    else
+        # The subshell drops set -e, or a non-zero claude would leave before
+        # writing its status
+        exec 4>&1
+        { ( set +e; "$@" 2>&3 3>&- 4>&-; echo $? >"$st" ) | tee -a "$RELAUNCH_LOG" >&4; } 3>&1 | tee -a "$RELAUNCH_LOG" >&2
+        exec 4>&-
+    fi
+    RELAUNCH_STATUS=$(cat "$st" 2>/dev/null)
+    is_uint "$RELAUNCH_STATUS" || RELAUNCH_STATUS=1
+    rm -f "$st"
+    unset CCS_RELAUNCH_STATUS
+}
+
+# The loop: run, look for the limit message, wait, add --continue, run again.
+# Exits with claude's status whenever there is nothing to wait for. Returns
+# (so the caller execs as usual) only when nothing here can record a tty.
+relaunch_loop() {
+    local reset rest clock mdate tz target now when has_resume past i n w rc
+    if [ -t 1 ] && ! command -v script >/dev/null 2>&1; then
+        warn "relaunch is on but script(1) is missing — running claude without it"
+        return 0
+    fi
+    while :; do
+        RELAUNCH_LOG=$(mktemp)
+        relaunch_capture "$@"
+        rc=0
+        reset=$(relaunch_detect "$RELAUNCH_LOG") || rc=$?
+        rm -f "$RELAUNCH_LOG"
+        case "$rc" in
+            0) ;;
+            2)
+                warn "usage limit hit, but the reset time could not be read — not relaunching"
+                exit "$RELAUNCH_STATUS"
+                ;;
+            *) exit "$RELAUNCH_STATUS" ;;
+        esac
+        clock=${reset%%|*}
+        rest=${reset#*|}
+        mdate=${rest%%|*}
+        tz=${rest#*|}
+        now=$(relaunch_now)
+        if ! target=$(relaunch_target "$clock" "$mdate" "$tz" "$now"); then
+            warn "usage limit hit, but the reset time could not be read — not relaunching"
+            exit "$RELAUNCH_STATUS"
+        fi
+        when="$clock"
+        [ -z "$mdate" ] || when="$mdate at $clock"
+        [ -z "$tz" ] || when="$when ($tz)"
+        info "Usage limit hit — relaunching at ${C_BOLD}${when}${C_RESET}, in $(fmt_duration $((target - now))). Ctrl-C to give up."
+        if [ -z "$CAFFEINE_CMD" ]; then
+            warn "caffeine is off — if the machine sleeps before then, so does the wait (try --caffeine)"
+        fi
+        relaunch_wait "$target"
+
+        # Insert --continue right after the claude word, unless the arguments
+        # already resume a session. Rotating through "$@" is how POSIX sh
+        # edits a positional list in place.
+        has_resume=0 past=0
+        for w in "$@"; do
+            if [ "$past" -eq 1 ]; then
+                case "$w" in -c|--continue|-r|--resume) has_resume=1 ;; esac
+            elif [ "$w" = "claude" ]; then
+                past=1
+            fi
+        done
+        if [ "$has_resume" -eq 0 ]; then
+            past=0 i=0 n=$#
+            while [ "$i" -lt "$n" ]; do
+                w=$1
+                shift
+                i=$((i + 1))
+                set -- "$@" "$w"
+                if [ "$past" -eq 0 ] && [ "$w" = "claude" ]; then
+                    past=1
+                    set -- "$@" --continue
+                fi
+            done
+        fi
+        info "Limit reset — relaunching ${C_BOLD}claude --continue${C_RESET}"
+    done
+}
+
+# Every launch ends here. Relaunch off: exec, ccs disappears. On: ccs stays
+# around as claude's parent to watch for the usage-limit message.
+launch_run() {
+    if [ "$(relaunch_mode)" = "on" ]; then
+        relaunch_loop "$@"
+    fi
+    exec "$@"
+}
+
 # No provider usable — run claude untouched instead of failing
 launch_vanilla() {
     if ! command -v claude >/dev/null 2>&1; then
@@ -977,7 +1278,7 @@ launch_vanilla() {
     warn "no provider configured — launching vanilla claude (run 'ccs use <provider>' to switch)"
     # Keep awake still applies: it is about the machine, not about the provider.
     # shellcheck disable=SC2086  # intentional: empty means "no wrapper"
-    exec $CAFFEINE_CMD claude "$@"
+    launch_run $CAFFEINE_CMD claude "$@"
 }
 
 # Everything a launch does before the provider matters, shared by `ccs`,
@@ -1050,7 +1351,7 @@ launch_resolved() {
             info "Launching claude ${C_DIM}(native login)${C_RESET}"
         fi
         # shellcheck disable=SC2086  # intentional: empty means "no wrapper"
-        exec env \
+        launch_run env \
             -u ANTHROPIC_API_KEY \
             -u ANTHROPIC_AUTH_TOKEN \
             -u ANTHROPIC_BASE_URL \
@@ -1098,7 +1399,7 @@ launch_resolved() {
         # Third-party provider: use ANTHROPIC_AUTH_TOKEN to avoid
         # the "Detected a custom API key" interactive prompt
         # shellcheck disable=SC2086  # intentional: empty means "do not set"
-        exec env \
+        launch_run env \
             -u ANTHROPIC_API_KEY \
             -u CLAUDE_CODE_MAX_CONTEXT_TOKENS \
             -u CLAUDE_CODE_MAX_OUTPUT_TOKENS \
@@ -1117,7 +1418,7 @@ launch_resolved() {
         # Claude Code ignores CLAUDE_CODE_MAX_CONTEXT_TOKENS for claude-* ids
         # anyway, so the native setup is left entirely alone.
         # shellcheck disable=SC2086  # intentional: empty means "no wrapper"
-        exec env \
+        launch_run env \
             -u ANTHROPIC_BASE_URL \
             -u ANTHROPIC_AUTH_TOKEN \
             -u ANTHROPIC_DEFAULT_OPUS_MODEL \
@@ -1218,6 +1519,7 @@ ${C_BOLD}USAGE${C_RESET}
 ${C_BOLD}LAUNCH FLAGS${C_RESET}
     --caffeine[=system|display] Keep the machine awake for this session only
     --no-caffeine               Let it sleep for this session only
+    --relaunch / --no-relaunch  Relaunch when the usage limit resets, this session only
                                 (must come first; everything else goes to claude)
 
 ${C_BOLD}COMMANDS${C_RESET}
@@ -1235,6 +1537,7 @@ ${C_BOLD}COMMANDS${C_RESET}
     models [refresh|clear]      Show / refresh the context windows ccs will use
     notify on|off|status|test   Desktop notifications when Claude needs you
     caffeine on|off|status      Keep the machine awake while claude runs
+    relaunch on|off|status      Wait out the usage limit, then claude --continue
     sync <subcommand>           Back up ~/.claude to a gist or repo (see below)
     doctor                      Check the install: claude, tools, config, hooks
     reset                       Clear active provider (back to vanilla claude)
@@ -1270,6 +1573,8 @@ ${C_BOLD}EXAMPLES${C_RESET}
     ccs notify on iterm2               Pin the terminal instead of auto-detect
     ccs caffeine on                    No sleep while claude runs, from now on
     ccs --caffeine -p "long task"      No sleep for this one session
+    ccs relaunch on                    Hit the limit? Wait for the reset, continue
+    ccs --relaunch --caffeine -p "…"   Overnight run that survives the limit
     ccs sync init --gist-new           Create a secret gist for your config
     ccs sync push                      Back it up
     ccs sync import <gist-url>         Rebuild a good install elsewhere
@@ -1313,6 +1618,23 @@ ${C_BOLD}KEEP AWAKE${C_RESET}
 
     A sleep assertion is a running process, not an environment variable, so
     'eval "\$(ccs env)"' cannot carry it. Launch through 'ccs' to get it.
+
+${C_BOLD}RELAUNCH${C_RESET}
+    Claude Code stops on "You've hit your session limit · resets 1:10am
+    (Europe/Berlin)". With 'ccs relaunch on' (or --relaunch), ccs stays as
+    claude's parent, reads that line when the session ends on it, waits until
+    the reset — machine kept awake if caffeine is on — then runs
+    'claude --continue' with the same provider and arguments.
+
+        interactive   claude does not exit on the limit: quit it after the
+                      message (Ctrl-C twice or /exit) and ccs takes over
+        -p / piped    automatic; give the prompt as an argument, stdin is
+                      gone by the second run
+
+    On a terminal the output is recorded through script(1) so the TUI keeps
+    a real tty; on a pipe through tee. The recording is a temp file, gone as
+    soon as the session ends. Without script(1), ccs warns and runs claude as
+    usual. Ctrl-C during the wait gives up. 'ccs env' cannot carry it.
 
 ${C_BOLD}CONFIG SYNC${C_RESET}
     'ccs sync' backs up what makes a good Claude Code install — global
@@ -1578,10 +1900,21 @@ doctor_sync() {
     fi
 }
 
+doctor_relaunch() {
+    if [ "$(relaunch_mode)" = "off" ]; then
+        doctor_ok "relaunch off"
+    elif command -v script >/dev/null 2>&1; then
+        doctor_ok "relaunch on via: $(command -v script)"
+    else
+        doctor_warn "relaunch is on, but script(1) is missing — only piped (-p) sessions can be watched"
+    fi
+}
+
 cmd_doctor() {
     printf '\n'
     doctor_tools
     doctor_caffeine
+    doctor_relaunch
     doctor_perm "$CONFIG_DIR" 700
     doctor_perm "$CONFIG_FILE" 600
     doctor_perm "$ACTIVE_FILE" 600
@@ -2904,6 +3237,8 @@ main() {
             --caffeine)    CAFFEINE_OVERRIDE="system";           shift ;;
             --caffeine=*)  CAFFEINE_OVERRIDE="${1#--caffeine=}"; shift ;;
             --no-caffeine) CAFFEINE_OVERRIDE="off";              shift ;;
+            --relaunch)    RELAUNCH_OVERRIDE="on";               shift ;;
+            --no-relaunch) RELAUNCH_OVERRIDE="off";              shift ;;
             *) break ;;
         esac
     done
@@ -2963,6 +3298,9 @@ main() {
             ;;
         caffeine)
             cmd_caffeine "$@"
+            ;;
+        relaunch)
+            cmd_relaunch "$@"
             ;;
         sync)
             cmd_sync "$@"

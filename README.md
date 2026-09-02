@@ -95,6 +95,7 @@ ccs <command> [arguments]
 LAUNCH FLAGS
     --caffeine[=system|display] Keep the machine awake for this session only
     --no-caffeine               Let it sleep for this session only
+    --relaunch / --no-relaunch  Relaunch when the usage limit resets, this session only
                                 (must come first; everything else goes to claude)
 
 COMMANDS
@@ -112,6 +113,7 @@ COMMANDS
     models [refresh|clear]      Show / refresh the context windows ccs will use
     notify on|off|status|test   Desktop notifications when Claude needs you
     caffeine on|off|status      Keep the machine awake while claude runs
+    relaunch on|off|status      Wait out the usage limit, then claude --continue
     sync <subcommand>           Back up ~/.claude to a gist or repo
     doctor                      Check the install: claude, tools, config, hooks
     reset                       Clear active provider (back to vanilla claude)
@@ -157,6 +159,7 @@ ccs models                            # See the context window ccs will use, per
 ccs                                   # Launch with active provider
 ccs --print "hello world"             # Pass flags through to claude
 ccs --caffeine -p "long refactor"     # ...and don't let the machine sleep
+ccs --relaunch --caffeine -p "…"      # ...and pick up again when the usage limit resets
 
 # One launch with another provider — the default stays what it was
 ccs with deepseek -p "review this"    # DeepSeek for this run only
@@ -248,6 +251,7 @@ Located at `~/.claude-provider/config`. Simple INI format, editable by hand:
 provider=claude
 model=
 caffeine=off
+relaunch=off
 
 # Native login — nothing is injected, claude runs on its own account
 [claude]
@@ -284,6 +288,8 @@ haiku_model=glm-4.7
 - **`auto_context=`** — in `[_defaults]`, set to `false` to disable the automatic lookup
 - **`caffeine=`** — in `[_defaults]`, `off` (default), `system` or `display`; written by
   `ccs caffeine on|off` (see [Keep the machine awake](#keep-the-machine-awake))
+- **`relaunch=`** — in `[_defaults]`, `off` (default) or `on`; written by `ccs relaunch on|off`
+  (see [Relaunch when the usage limit resets](#relaunch-when-the-usage-limit-resets))
 
 Sections whose name starts with `_` are **reserved**: they hold settings, never providers, so they
 never show up in `ccs list`. Alongside `[_defaults]` there is `[_sync]`, normally written by
@@ -473,6 +479,35 @@ The state lives in `[_defaults] caffeine=` in `~/.claude-provider/config` — no
 Not using `ccs`, or on native Windows? [claudfeine](https://github.com/maxgfr/claudfeine) is the
 same idea as a standalone wrapper around `claude` (and `codex`), and ships a PowerShell wrapper
 built on `SetThreadExecutionState` for Windows.
+
+## Relaunch when the usage limit resets
+
+```sh
+ccs relaunch on                    # from now on
+ccs --relaunch -p "finish the migration"   # this session only; --no-relaunch turns it off once
+```
+
+Claude Code stops on `You've hit your session limit · resets 1:10am (Europe/Berlin)`. With
+relaunch on, ccs stays as claude's parent instead of `exec`ing it, reads that line when the session
+ends on it, waits until the reset — keeping the machine awake if caffeine is on — then runs
+`claude --continue` with the same provider and arguments, so the conversation picks up where it
+stopped.
+
+- **Interactive** — claude does not exit on the limit. Quit it after the message (Ctrl-C twice or
+  `/exit`) and ccs takes over: it prints when it will be back and waits.
+- **`-p` / piped** — automatic: claude exits with the message, ccs waits and reruns it. Give the
+  prompt as an argument rather than on stdin, since stdin is gone by the second run.
+- The relaunch is `claude --continue …`, the most recent conversation in the current directory. A
+  `--continue` / `--resume` already in the arguments is respected, not duplicated.
+- On a terminal the output is recorded through `script(1)` (macOS, util-linux, busybox) so the TUI
+  keeps a real tty; on a pipe, through `tee`, stdout and stderr kept apart. The recording is a temp
+  file removed as soon as the session ends — nothing is stored. Without `script`, ccs warns and runs
+  claude as usual.
+- The session wording (`resets 1:10am`) and the weekly one (`resets Sep 5 at 9am`) are both read,
+  with the time zone in parentheses. If the reset time cannot be read, ccs says so and exits with
+  claude's status.
+- Ctrl-C during the wait gives up. For an overnight run combine it with caffeine:
+  `ccs --relaunch --caffeine -p "…"`. `ccs env` cannot carry it, like caffeine.
 
 ## Config backup & sync
 
