@@ -588,7 +588,10 @@ that branch of the `exec` is nothing but `env -u ... claude`, plus the keep-awak
 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS`| Third-party — the model's real context window      |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | Third-party — the model's real output limit        |
 
-State is persisted in `~/.claude-provider/active` so `ccs` works across shell sessions. Run `ccs reset` to clear it, or `ccs purge` to remove all ccs data.
+The provider and model chosen with `ccs use` are persisted in `~/.claude-provider/active` so `ccs`
+works across shell sessions. The key, endpoint and tier models are read from the config at every
+launch, so editing `api_key=` is enough — no need to run `ccs use` again. Run `ccs reset` to clear
+the active provider, or `ccs purge` to remove all ccs data.
 
 Everything ccs owns lives in `~/.claude-provider/`: `config`, `active`, `models-cache`,
 `hooks/` (notify + sync), `sync/` (the git working copy) and `sync-backup/` (the snapshots taken

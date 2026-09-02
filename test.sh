@@ -150,11 +150,11 @@ assert_contains "use zai shows provider" "zai" "$out"
 assert_eq "active file exists" "true" "$([ -f "$TEST_CONFIG_DIR/.claude-provider/active" ] && echo true || echo false)"
 active=$(cat "$TEST_CONFIG_DIR/.claude-provider/active")
 assert_contains "active has correct provider" "PROVIDER=zai" "$active"
-assert_contains "active has correct base_url" "BASE_URL=https://api.z.ai/api/anthropic" "$active"
 assert_contains "active has correct model" "MODEL=glm-5.1" "$active"
-assert_contains "active has opus_model" "OPUS_MODEL=glm-5.1" "$active"
-assert_contains "active has sonnet_model" "SONNET_MODEL=glm-5.1" "$active"
-assert_contains "active has haiku_model" "HAIKU_MODEL=glm-4.7" "$active"
+# The key and endpoint live in the config only: active names the provider,
+# nothing more, so a key edited later is live at the next launch.
+assert_not_contains "active carries no api key" "API_KEY" "$active"
+assert_not_contains "active carries no base_url" "BASE_URL" "$active"
 config=$(cat "$TEST_CONFIG_DIR/.claude-provider/config")
 assert_contains "use also sets default provider" "provider=zai" "$config"
 assert_contains "use also sets default model" "model=glm-5.1" "$config"
@@ -337,6 +337,54 @@ assert_contains "third-party launch sets AUTH_TOKEN" "ANTHROPIC_AUTH_TOKEN=sk-an
 rm -rf "$SHIM_DIR"
 teardown
 
+# -- The config is the source of truth for key and endpoint at launch --
+printf '\033[1m[live config at launch]\033[0m\n'
+setup
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+set_all_keys "test-key-123"
+"$CCS" use zai >/dev/null 2>&1
+set_key zai api_key "rotated-key-0123456789"
+set_key zai base_url "https://moved.example/anthropic"
+set_key zai haiku_model "glm-4.7-flash"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>/dev/null)
+assert_contains "launch sends the key now in the config" "ANTHROPIC_AUTH_TOKEN=rotated-key-0123456789" "$out"
+assert_contains "launch uses the base_url now in the config" "ANTHROPIC_BASE_URL=https://moved.example/anthropic" "$out"
+assert_contains "launch uses the tier now in the config" "ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.7-flash" "$out"
+assert_contains "launch keeps the model chosen with use" "ANTHROPIC_MODEL=glm-5.1" "$out"
+out=$("$CCS" env)
+assert_contains "env follows the config too" "ANTHROPIC_AUTH_TOKEN='rotated-key-0123456789'" "$out"
+out=$("$CCS" status)
+assert_contains "status shows the current key, masked" "rotated-...6789" "$out"
+assert_contains "status shows the current base url" "moved.example" "$out"
+# A model chosen with `use <provider> <model>` survives a config edit
+"$CCS" use zai glm-4.7 >/dev/null 2>&1
+set_key zai api_key "another-key"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>/dev/null)
+assert_contains "explicit model survives a key rotation" "ANTHROPIC_MODEL=glm-4.7" "$out"
+assert_contains "and the rotated key is used" "ANTHROPIC_AUTH_TOKEN=another-key" "$out"
+# A blanked key is an error, not a silent launch with an empty token
+set_key zai api_key ""
+err=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>&1 || true)
+assert_contains "a blanked key stops the launch" "no API key" "$err"
+assert_exit "with a non-zero exit" "1" "$CCS" launch
+assert_exit "env fails the same way" "1" "$CCS" env
+# An active file from before this change still carries a key: honour it when
+# its section is gone from the config, so nothing breaks on upgrade
+ACTIVE="$TEST_CONFIG_DIR/.claude-provider/active"
+printf 'PROVIDER=legacy\nMODEL=old-model\nBASE_URL=https://legacy.example/v1\nAPI_KEY=legacy-key\nOPUS_MODEL=old-opus\nSONNET_MODEL=old-model\nHAIKU_MODEL=old-haiku\nNATIVE=\n' > "$ACTIVE"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>/dev/null)
+assert_contains "legacy active file: key still used" "ANTHROPIC_AUTH_TOKEN=legacy-key" "$out"
+assert_contains "legacy active file: base_url still used" "ANTHROPIC_BASE_URL=https://legacy.example/v1" "$out"
+assert_contains "legacy active file: tiers still used" "ANTHROPIC_DEFAULT_OPUS_MODEL=old-opus" "$out"
+# A provider removed from the config with no key on record cannot launch
+printf 'PROVIDER=gone\nMODEL=m\nNATIVE=\n' > "$ACTIVE"
+err=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>&1 || true)
+assert_contains "a vanished provider says so" "no longer in the config" "$err"
+rm -rf "$SHIM_DIR"
+teardown
+
 # -- ccs -h / -v are ccs flags, not claude passthrough --
 printf '\033[1m[-h and -v flags]\033[0m\n'
 setup
@@ -389,7 +437,7 @@ assert_contains "use claude works with no key anywhere" "native login" "$out"
 assert_contains "active records the provider" "PROVIDER=claude" "$(cat "$ACTIVE")"
 assert_contains "active records native mode" "NATIVE=1" "$(cat "$ACTIVE")"
 assert_eq "active carries no model" "MODEL=" "$(grep '^MODEL=' "$ACTIVE")"
-assert_eq "active carries no key" "API_KEY=" "$(grep '^API_KEY=' "$ACTIVE")"
+assert_not_contains "active carries no key" "API_KEY" "$(cat "$ACTIVE")"
 assert_contains "defaults follow" "provider=claude" "$(cat "$CFG")"
 assert_eq "defaults carry no model either" "model=" \
     "$(awk '/^\[/ { s = $0 } s == "[_defaults]" && /^model=/ { print }' "$CFG")"

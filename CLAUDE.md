@@ -24,8 +24,13 @@
   `case` + parameter expansions). **No `sed`/`cut` in `parse_config`**: it runs on every launch and a
   fork per line cost ~400 ms on a 100-line config. Spaces around `=` are trimmed, same rule as
   `config_set`. `write_defaults` is one `awk` pass for the same reason
-- **State**: `~/.claude-provider/active` stores current provider/model, plus `NATIVE=` for the
-  native login (removed by `ccs reset`)
+- **State**: `~/.claude-provider/active` stores the current provider and model, plus `NATIVE=` for
+  the native login (removed by `ccs reset`). **Nothing else**: key, `base_url` and tier models are
+  re-read from the config by `load_state` at every launch through `resolve_provider`, so editing
+  the config is enough and no second copy of a key sits on disk. Files written by older versions
+  still carry `API_KEY=`/`BASE_URL=`; `read_active` keeps reading them and they win only when the
+  provider has since vanished from the config. A blanked key on the active provider is an error at
+  launch (the provider was chosen explicitly), unlike the `[_defaults]` path which stays vanilla
 - **Model cache**: `~/.claude-provider/models-cache` stores resolved context windows (survives
   `reset`, removed by `purge`)
 - **Sync state**: `~/.claude-provider/sync/` (git working copy), `sync-backup/<timestamp>/`
