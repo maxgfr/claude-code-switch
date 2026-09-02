@@ -114,7 +114,7 @@ test.sh             # Integration test suite (run in CI, hermetic: stubs llm-mod
 
 ## Commands
 
-`ccs use|list|status|config|launch|env|models|notify|caffeine|sync|reset|purge|help|version`
+`ccs use|list|status|config|launch|env|models|notify|caffeine|sync|doctor|reset|purge|help|version`
 
 `ccs config` alone opens `$EDITOR`; `config get <section> <key>` prints one value (empty and exit 0
 when unset), `config set <section> <key> [value]` writes one through `config_set` (creating the
@@ -209,6 +209,21 @@ and `--no-caffeine`.
 - `test.sh` runs the whole sync suite against a `git init --bare` repo over `file://`: no network,
   no `gh`. ccs writes its own git identity into the working copy (`sync_git_identity`), which is
   what makes it pass on a CI runner with no global git config
+
+## Doctor (`ccs doctor`)
+
+- **Read-only, no network.** One `doctor_*` function per area, each printing `ok` / `warn` / `fail`
+  lines through the three `doctor_ok|warn|fail` helpers; only `doctor_fail` flips `DOCTOR_FAILED`,
+  and that is the sole source of the exit status. A missing optional tool is a `warn` that names
+  what it switches off — the same contract as the runtime degradation
+- Reuses the real helpers rather than re-deriving anything: `have_git`, `have_llm_models`,
+  `caffeine_mode` + `caffeine_resolve`, `read_active` + `has_provider`, `load_sync_cfg`, and jq
+  for the hook scan (`.hooks[][].hooks[].command` filtered on `$CCS_HOOK_MARKER`, each checked with
+  `-x`). Invalid section headers are found with a grep on the file, because `parse_config` only
+  reports them on stderr
+- `test.sh` covers it with the existing stubs plus a rebuilt bare `PATH` (same trick as
+  `[sync: git absent]`) to reach every warn, and a hand-written `settings.json` for the orphan-hook
+  and invalid-JSON fails
 
 ## Notifications (`ccs notify`)
 

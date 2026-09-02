@@ -110,6 +110,7 @@ COMMANDS
     notify on|off|status|test   Desktop notifications when Claude needs you
     caffeine on|off|status      Keep the machine awake while claude runs
     sync <subcommand>           Back up ~/.claude to a gist or repo
+    doctor                      Check the install: claude, tools, config, hooks
     reset                       Clear active provider (back to vanilla claude)
     purge                       Remove all ccs data (~/.claude-provider/)
     help                        Show help
@@ -556,6 +557,23 @@ is only ever written when the local one is empty — **a pull can never cost you
 > `import` write into `~/.claude`. Both are explicit commands, both snapshot first, and nothing
 > outside the allow-list above is ever read or written. `ccs sync off` forgets the remote and
 > leaves every file alone.
+
+## Check your install
+
+```sh
+ccs doctor
+```
+
+One line per check, read-only, no network. `ok` / `warn` / `fail`; the exit status is 1 only when
+something is actually broken:
+
+- **fail** — `claude` missing from `PATH`; the active provider has no key or is gone from the
+  config; `~/.claude/settings.json` is not valid JSON; a ccs hook in it points to a script that no
+  longer exists (regenerate with `ccs notify on` / `ccs sync hooks on`, or detach with `off`)
+- **warn** — an optional tool is missing (`jq`, `git`, `llm-models`) with what that switches off;
+  caffeine is on but no keep-awake tool works here (WSL included); a config section the parser
+  skips; permissions looser than `700` on `~/.claude-provider` or `600` on `config` / `active`
+- **info as ok** — the active provider, the sync remote and whether its working copy exists
 
 ## Shell integration
 

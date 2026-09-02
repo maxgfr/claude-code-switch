@@ -437,6 +437,84 @@ assert_contains "a key set with config set is used at launch" "ANTHROPIC_AUTH_TO
 rm -rf "$SHIM_DIR"
 teardown
 
+# -- doctor: read-only checks, exit 1 only on a fail --
+printf '\033[1m[doctor]\033[0m\n'
+setup
+CFG="$TEST_CONFIG_DIR/.claude-provider/config"
+SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\necho CLAUDE_RAN\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+# A PATH with everything ccs needs and nothing optional: no claude, no jq,
+# no git, no llm-models, no keep-awake tool
+BARE_DIR=$(mktemp -d)
+for b in sh sed awk grep find mkdir mktemp date cat cp rm mv ls chmod rmdir \
+         head tail tr wc uname diff sort stat env dirname basename rev cut \
+         touch sleep kill expr; do
+    p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$BARE_DIR/$b"
+done
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1)
+assert_exit "a fresh install is healthy" "0" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+assert_contains "doctor finds claude" "claude" "$out"
+assert_contains "doctor reports the native default" "claude" "$out"
+assert_not_contains "nothing fails on a fresh install" "fail" "$out"
+out=$(PATH="$BARE_DIR" "$CCS" doctor 2>&1 || true)
+assert_exit "no claude on PATH is a fail" "1" env PATH="$BARE_DIR" "$CCS" doctor
+assert_contains "and says so" "claude" "$out"
+assert_contains "missing jq is a warn naming notify" "notify" "$out"
+assert_contains "missing git is a warn naming sync" "sync" "$out"
+assert_contains "missing llm-models is a warn naming the window" "llm-models" "$out"
+# Active provider checks
+set_all_keys "test-key-123"
+"$CCS" use zai >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1)
+assert_contains "doctor shows the active provider" "zai" "$out"
+"$CCS" config set zai api_key "" >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1 || true)
+assert_exit "active provider without a key is a fail" "1" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+assert_contains "and names the fix" "config set zai api_key" "$out"
+printf 'PROVIDER=gone\nMODEL=m\nNATIVE=\n' > "$TEST_CONFIG_DIR/.claude-provider/active"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1 || true)
+assert_contains "a vanished provider is a fail" "no longer in the config" "$out"
+"$CCS" use claude >/dev/null 2>&1
+# Config hygiene
+printf '\n[bad name]\nx=1\n' >> "$CFG"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1)
+assert_contains "an invalid section is a warn" "bad name" "$out"
+assert_exit "but not a fail" "0" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+chmod 644 "$CFG"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1)
+assert_contains "a world-readable config is a warn" "600" "$out"
+chmod 600 "$CFG"
+# Keep-awake
+"$CCS" caffeine on >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$BARE_DIR" "$CCS" doctor 2>&1 || true)
+assert_contains "caffeine on without a tool is a warn" "keep-awake" "$out"
+"$CCS" caffeine off >/dev/null 2>&1
+# settings.json: broken JSON, then an orphan ccs hook
+mkdir -p "$TEST_CONFIG_DIR/.claude"
+printf '{not json' > "$SETTINGS"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1 || true)
+assert_exit "invalid settings.json is a fail" "1" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+assert_contains "and is named" "settings.json" "$out"
+printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s/.claude-provider/hooks/notify-stop.sh"}]}]}}\n' \
+    "$TEST_CONFIG_DIR" > "$SETTINGS"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1 || true)
+assert_exit "an orphan ccs hook is a fail" "1" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+assert_contains "and points at the script" "notify-stop.sh" "$out"
+assert_contains "and suggests the fix" "ccs notify on" "$out"
+"$CCS" notify on bell >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1)
+assert_exit "a live ccs hook is fine" "0" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+assert_contains "and is counted" "hook" "$out"
+# Sync: remote shown, no network
+"$CCS" config set _sync remote "https://example.invalid/x.git" >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1 || true)
+assert_contains "the sync remote is reported" "example.invalid" "$out"
+assert_contains "and a missing working copy is mentioned" "working copy" "$out"
+rm -rf "$SHIM_DIR" "$BARE_DIR"
+teardown
+
 # -- ccs -h / -v are ccs flags, not claude passthrough --
 printf '\033[1m[-h and -v flags]\033[0m\n'
 setup

@@ -1195,6 +1195,7 @@ ${C_BOLD}COMMANDS${C_RESET}
     notify on|off|status|test   Desktop notifications when Claude needs you
     caffeine on|off|status      Keep the machine awake while claude runs
     sync <subcommand>           Back up ~/.claude to a gist or repo (see below)
+    doctor                      Check the install: claude, tools, config, hooks
     reset                       Clear active provider (back to vanilla claude)
     purge                       Remove all ccs data (~/.claude-provider/)
     help                        Show this help
@@ -1229,6 +1230,7 @@ ${C_BOLD}EXAMPLES${C_RESET}
     ccs sync init --gist-new           Create a secret gist for your config
     ccs sync push                      Back it up
     ccs sync import <gist-url>         Rebuild a good install elsewhere
+    ccs doctor                         Anything broken? Exit 1 if so
 
 ${C_BOLD}NATIVE LOGIN${C_RESET}
     'ccs use claude' selects the [claude] provider, which configures nothing:
@@ -1361,6 +1363,194 @@ cmd_models() {
         "${C_DIM}" "${C_RESET}"
     printf '  %sA wrong pick? Set %scontext_tokens=%s in the [%s] section of the config.%s\n\n' \
         "${C_DIM}" "${C_RESET}${C_BOLD}" "${C_RESET}${C_DIM}" "$ACTIVE_PROVIDER" "${C_RESET}"
+}
+
+# --- Doctor ---
+# `ccs doctor` is read-only: one line per check, exit 1 only when something is
+# actually broken (a fail), never for a missing optional tool (a warn).
+
+DOCTOR_FAILED=0
+
+doctor_ok()   { printf '  %sok%s    %s\n' "${C_GREEN}" "${C_RESET}" "$*"; }
+doctor_warn() { printf '  %swarn%s  %s\n' "${C_YELLOW}" "${C_RESET}" "$*"; }
+doctor_fail() { printf '  %sfail%s  %s\n' "${C_RED}" "${C_RESET}" "$*"; DOCTOR_FAILED=1; }
+
+# Octal permission bits of a path, GNU or BSD stat
+file_mode() {
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%A' "$1" 2>/dev/null || printf '?'
+}
+
+# $HOME shortened to ~ for display only
+tilde() {
+    case "$1" in
+        "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+doctor_perm() {
+    local path="$1" want="$2" have
+    [ -e "$path" ] || return 0
+    have=$(file_mode "$path")
+    if [ "$have" = "$want" ]; then
+        doctor_ok "$(tilde "$path") is $want"
+    else
+        doctor_warn "$(tilde "$path") is $have, expected $want — run: chmod $want $(tilde "$path")"
+    fi
+}
+
+doctor_tools() {
+    if command -v claude >/dev/null 2>&1; then
+        doctor_ok "claude: $(command -v claude)"
+    else
+        doctor_fail "claude not found on PATH — install Claude Code first"
+    fi
+    if command -v jq >/dev/null 2>&1; then
+        doctor_ok "jq: $(command -v jq)"
+    else
+        doctor_warn "jq not found — 'ccs notify' and settings.json handling in sync are unavailable"
+    fi
+    if have_git; then
+        doctor_ok "git: $(command -v git)"
+    else
+        doctor_warn "git not found — 'ccs sync' is unavailable"
+    fi
+    if have_llm_models; then
+        doctor_ok "llm-models: $(command -v llm-models)"
+    else
+        doctor_warn "llm-models not found — context windows are not sized (brew install maxgfr/tap/llm-models)"
+    fi
+}
+
+doctor_caffeine() {
+    local mode
+    mode=$(caffeine_mode)
+    if [ "$mode" = "off" ]; then
+        doctor_ok "caffeine off"
+    elif caffeine_resolve "$mode" 2>/dev/null; then
+        doctor_ok "caffeine $mode via: $CAFFEINE_CMD"
+    elif grep -qi microsoft "$CCS_OSRELEASE" 2>/dev/null; then
+        doctor_warn "caffeine $mode is on, but WSL cannot keep the Windows host awake"
+    else
+        doctor_warn "caffeine $mode is on, but no keep-awake tool works here — sessions launch, just not caffeinated"
+    fi
+}
+
+doctor_config() {
+    local bad n
+    parse_config 2>/dev/null || true
+    # Section headers the parser refuses: anything but [a-zA-Z0-9_] inside the brackets
+    bad=$(grep -E '^[[:space:]]*\[' "$CONFIG_FILE" 2>/dev/null \
+          | grep -vE '^[[:space:]]*\[[A-Za-z0-9_]+\][[:space:]]*$' || true)
+    if [ -n "$bad" ]; then
+        n=$(printf '%s\n' "$bad" | wc -l | tr -d ' ')
+        doctor_warn "config: $n section header(s) skipped by the parser: $(printf '%s' "$bad" | tr '\n' ' ')"
+    else
+        doctor_ok "config parses cleanly ($(printf '%s' "$PROVIDERS" | wc -w | tr -d ' ') providers)"
+    fi
+
+    local dp
+    if read_active 2>/dev/null && [ -n "$ACTIVE_PROVIDER" ]; then
+        if [ -n "$ACTIVE_NATIVE" ]; then
+            doctor_ok "active provider: $ACTIVE_PROVIDER (native login)"
+        elif has_provider "$ACTIVE_PROVIDER"; then
+            if [ -n "$(get_cfg "$ACTIVE_PROVIDER" "api_key")" ]; then
+                doctor_ok "active provider: $ACTIVE_PROVIDER / $ACTIVE_MODEL"
+            else
+                doctor_fail "active provider '$ACTIVE_PROVIDER' has no API key — run: ccs config set $ACTIVE_PROVIDER api_key"
+            fi
+        elif [ -n "$ACTIVE_API_KEY" ]; then
+            doctor_warn "active provider '$ACTIVE_PROVIDER' is no longer in the config; launching on the key saved by an older ccs"
+        else
+            doctor_fail "active provider '$ACTIVE_PROVIDER' is no longer in the config — run: ccs use <provider>"
+        fi
+    else
+        dp=$(get_cfg "_defaults" "provider")
+        if [ -z "$dp" ]; then
+            doctor_ok "no active provider — launches run vanilla claude"
+        elif has_provider "$dp"; then
+            doctor_ok "no active provider — launches use [_defaults] provider=$dp"
+        else
+            doctor_warn "[_defaults] provider=$dp is not in the config — launches run vanilla claude"
+        fi
+    fi
+}
+
+doctor_settings() {
+    local cmds cmd n=0 orphan=0
+    local shown
+    shown=$(tilde "$CLAUDE_SETTINGS")
+    if [ ! -f "$CLAUDE_SETTINGS" ]; then
+        doctor_ok "no $shown — nothing for ccs to have touched"
+        return 0
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        if grep -qF "$CCS_HOOK_MARKER" "$CLAUDE_SETTINGS" 2>/dev/null; then
+            doctor_warn "$shown has ccs hooks, but jq is missing so they cannot be checked"
+        else
+            doctor_ok "$shown has no ccs hooks"
+        fi
+        return 0
+    fi
+    if ! jq empty "$CLAUDE_SETTINGS" 2>/dev/null; then
+        doctor_fail "$shown is not valid JSON — Claude Code ignores ALL of it until fixed"
+        return 0
+    fi
+    doctor_ok "$shown is valid JSON"
+    cmds=$(jq -r '.hooks // {} | to_entries[] | .value[]? | .hooks[]? | .command // empty' \
+           "$CLAUDE_SETTINGS" 2>/dev/null | grep -F "$CCS_HOOK_MARKER" || true)
+    [ -n "$cmds" ] || { doctor_ok "no ccs hooks in settings.json"; return 0; }
+    while IFS= read -r cmd; do
+        [ -n "$cmd" ] || continue
+        n=$((n + 1))
+        if [ ! -x "$cmd" ]; then
+            orphan=1
+            doctor_fail "hook points to a missing script: $(tilde "$cmd")"
+        fi
+    done <<EOF
+$cmds
+EOF
+    if [ "$orphan" = "1" ]; then
+        printf '        regenerate with %sccs notify on%s / %sccs sync hooks on%s, or detach with the matching %soff%s\n' \
+            "${C_BOLD}" "${C_RESET}" "${C_BOLD}" "${C_RESET}" "${C_BOLD}" "${C_RESET}"
+    else
+        doctor_ok "$n ccs hook(s) in settings.json, scripts present"
+    fi
+}
+
+doctor_sync() {
+    load_sync_cfg
+    if [ -z "$SYNC_REMOTE" ]; then
+        doctor_ok "sync not configured"
+        return 0
+    fi
+    doctor_ok "sync remote: $SYNC_REMOTE ($SYNC_KIND)"
+    if [ -d "$SYNC_DIR/.git" ]; then
+        doctor_ok "sync working copy present: $(tilde "$SYNC_DIR")"
+    else
+        doctor_warn "sync working copy missing — the next push or pull clones it (no network was used)"
+    fi
+    if [ "$SYNC_AUTO_LAUNCH" = "true" ] && ! have_git; then
+        doctor_warn "sync auto is on but git is missing — every launch will skip it"
+    fi
+}
+
+cmd_doctor() {
+    printf '\n'
+    doctor_tools
+    doctor_caffeine
+    doctor_perm "$CONFIG_DIR" 700
+    doctor_perm "$CONFIG_FILE" 600
+    doctor_perm "$ACTIVE_FILE" 600
+    doctor_config
+    doctor_settings
+    doctor_sync
+    printf '\n'
+    if [ "$DOCTOR_FAILED" = "1" ]; then
+        printf '  %sSomething needs fixing — see the fail lines above.%s\n\n' "${C_RED}" "${C_RESET}"
+        return 1
+    fi
+    printf '  %sAll good.%s\n\n' "${C_GREEN}" "${C_RESET}"
 }
 
 cmd_reset() {
@@ -2718,6 +2908,9 @@ main() {
             ;;
         reset)
             cmd_reset
+            ;;
+        doctor)
+            cmd_doctor
             ;;
         notify)
             cmd_notify "$@"
