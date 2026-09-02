@@ -2522,19 +2522,28 @@ sync_auto_once() {
 }
 
 # Run a command with a wall-clock budget. macOS ships no timeout(1), so this is
-# a plain background job plus a one-second-granularity watchdog.
+# a plain background job plus a watchdog. The watchdog ticks every 0.1 s: a
+# sync that takes 50 ms must not cost the launch a full second. Sub-second
+# sleep is not POSIX, but GNU, BSD/macOS and busybox all accept it; where it
+# is refused the loop falls back to whole seconds.
 sync_run_bounded() {
-    local secs="$1" pid i=0 rc=0
+    local secs="$1" pid ticks=0 max rc=0 step="0.1"
     shift
+    max=$((secs * 10))
     ( "$@" ) >/dev/null 2>&1 &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
-        i=$((i + 1))
-        if [ "$i" -gt "$secs" ]; then
+        ticks=$((ticks + 1))
+        if [ "$ticks" -gt "$max" ]; then
             kill -TERM "$pid" 2>/dev/null || true
             return 124
         fi
-        sleep 1
+        if ! sleep "$step" 2>/dev/null; then
+            step=1
+            max="$secs"
+            ticks=$((ticks / 10))
+            sleep 1
+        fi
     done
     wait "$pid" || rc=$?
     return "$rc"

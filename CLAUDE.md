@@ -193,7 +193,9 @@ and `--no-caffeine`.
   works on a fresh machine
 - `sync auto on` runs inside `sync_run_bounded` (background job + `kill -0` watchdog — macOS has no
   `timeout(1)`) and **must never be fatal**: `cmd_launch` calls it before anything provider-related
-  and ignores every failure
+  and ignores every failure. The watchdog ticks every 0.1 s (`sleep 0.1` is not POSIX but GNU,
+  BSD/macOS and busybox take it; a refusal falls back to 1 s), so a 50 ms sync costs the launch
+  50 ms, not a full second
 - `include_ccs=true` publishes `~/.claude-provider/config` with every `api_key=` blanked and the
   `[_sync]` section stripped. On the way back, `sync_merge_ccs_config` writes an `api_key` only when
   the local one is empty — a pull must never cost a key
