@@ -1181,6 +1181,46 @@ assert_contains "display mode inhibits idle too" \
 rm -rf "$NOSD_DIR"
 teardown
 
+# -- with: a one-off launch that changes no state --
+printf '\033[1m[with]\033[0m\n'
+setup
+ACTIVE="$TEST_CONFIG_DIR/.claude-provider/active"
+CFG="$TEST_CONFIG_DIR/.claude-provider/config"
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\necho "CLAUDE_ARGV:$*"\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+set_all_keys "test-key-123"
+"$CCS" use zai >/dev/null 2>&1
+before_active=$(cat "$ACTIVE")
+before_config=$(cat "$CFG")
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" with deepseek 2>/dev/null)
+assert_contains "with launches the requested provider" "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic" "$out"
+assert_contains "with uses that provider's model" "ANTHROPIC_MODEL=deepseek-chat" "$out"
+assert_contains "with uses that provider's tiers" "ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-reasoner" "$out"
+assert_eq "active is untouched" "$before_active" "$(cat "$ACTIVE")"
+assert_eq "config is untouched" "$before_config" "$(cat "$CFG")"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" with openrouter/anthropic/claude-sonnet-4 --version 2>/dev/null)
+assert_contains "split at the first slash: provider" "ANTHROPIC_BASE_URL=https://openrouter.ai/api" "$out"
+assert_contains "split at the first slash: the model keeps its own slashes" "ANTHROPIC_MODEL=anthropic/claude-sonnet-4" "$out"
+assert_contains "everything after goes to claude" "CLAUDE_ARGV:--version" "$out"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" with claude 2>/dev/null)
+assert_not_contains "with claude injects nothing" "ANTHROPIC_" "$out"
+assert_contains "but still launches" "CLAUDE_ARGV:" "$out"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" with anthropic -p hi 2>/dev/null)
+assert_contains "with anthropic uses the API key" "ANTHROPIC_API_KEY=test-key-123" "$out"
+assert_contains "and hands the prompt over" "CLAUDE_ARGV:-p hi" "$out"
+assert_exit "with needs a provider" "1" "$CCS" with
+assert_exit "unknown provider is rejected" "1" "$CCS" with nope
+assert_exit "the native login takes no model" "1" "$CCS" with claude/foo
+"$CCS" config set custom api_key "" >/dev/null 2>&1
+assert_exit "a provider without a key is an error, not vanilla" "1" "$CCS" with custom
+caffeine_shims
+out=$(PATH="$CAFF_DIR:$SHIM_DIR:$PATH" "$CCS" --caffeine with zai 2>/dev/null)
+assert_contains "--caffeine with <provider> is wrapped" "CAFFEINE_ARGS" "$out"
+assert_contains "and still gets the provider env" "ANTHROPIC_AUTH_TOKEN=test-key-123" "$out"
+rm -rf "$SHIM_DIR" "$CAFF_DIR"
+teardown
+
 # --- Sync helpers ---------------------------------------------------------
 # The whole sync suite runs against a bare repo on disk reached over file://,
 # so it never touches the network and never needs gh. git identity is written

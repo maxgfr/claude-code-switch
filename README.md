@@ -88,6 +88,8 @@ ccs sync pull              # 3. …restore it anywhere else
 
 ```
 ccs [args...]               Launch claude with active provider (default)
+ccs with <provider>[/<model>] [args...]
+                            One launch with that provider, nothing saved
 ccs <command> [arguments]
 
 LAUNCH FLAGS
@@ -105,6 +107,7 @@ COMMANDS
                                 Set one value; no value = read it from stdin,
                                 hidden when that is a terminal
     launch [args...]            Launch claude with active provider env vars
+    with <provider>[/<model>]   Launch once with another provider (see above)
     env                         Print export statements for current shell
     models [refresh|clear]      Show / refresh the context windows ccs will use
     notify on|off|status|test   Desktop notifications when Claude needs you
@@ -154,6 +157,11 @@ ccs models                            # See the context window ccs will use, per
 ccs                                   # Launch with active provider
 ccs --print "hello world"             # Pass flags through to claude
 ccs --caffeine -p "long refactor"     # ...and don't let the machine sleep
+
+# One launch with another provider — the default stays what it was
+ccs with deepseek -p "review this"    # DeepSeek for this run only
+ccs with openrouter/openai/gpt-4o     # provider/model, split at the first slash
+ccs with claude                       # the native login, once
 
 # Export to current shell
 eval "$(ccs env)"                     # Export env vars to current session

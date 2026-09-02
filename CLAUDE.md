@@ -114,7 +114,14 @@ test.sh             # Integration test suite (run in CI, hermetic: stubs llm-mod
 
 ## Commands
 
-`ccs use|list|status|config|launch|env|models|notify|caffeine|sync|doctor|reset|purge|help|version`
+`ccs use|list|status|config|launch|with|env|models|notify|caffeine|sync|doctor|reset|purge|help|version`
+
+`ccs with <provider>[/<model>] [args…]` is a one-off launch: `launch_prepare` (sync + caffeine,
+shared with `cmd_launch`) then `parse_config` + `validate_provider` + `resolve_provider` +
+`launch_resolved` — never `write_active`/`write_defaults`. The split is at the **first** `/` so a
+model id with slashes (`openrouter/anthropic/claude-sonnet-4`) survives; everything after the
+first word goes to claude untouched. `launch_resolved` is the tail of every launch (native branch
+included) and is the only place that execs claude with `ACTIVE_*`.
 
 `ccs config` alone opens `$EDITOR`; `config get <section> <key>` prints one value (empty and exit 0
 when unset), `config set <section> <key> [value]` writes one through `config_set` (creating the

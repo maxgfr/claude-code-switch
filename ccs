@@ -980,22 +980,60 @@ launch_vanilla() {
     exec $CAFFEINE_CMD claude "$@"
 }
 
-cmd_launch() {
+# Everything a launch does before the provider matters, shared by `ccs`,
+# `ccs launch` and `ccs with`.
+launch_prepare() {
     # Config sync runs before anything provider-related: it is about ~/.claude,
     # not about which model answers. It can never stop the launch.
     sync_auto_launch
 
-    # Resolved before load_state so the vanilla fallback below is caffeinated
-    # too — a missing tool warns and launches anyway, it is never fatal.
+    # Resolved before load_state so the vanilla fallback is caffeinated too —
+    # a missing tool warns and launches anyway, it is never fatal.
     if ! caffeine_resolve "$(caffeine_mode)"; then
         warn "no keep-awake tool found on this system — the session will not stay awake"
     fi
+}
+
+cmd_launch() {
+    launch_prepare
 
     # Active state first, then [_defaults]; neither usable means vanilla claude
     if ! load_state; then
         launch_vanilla "$@"
     fi
 
+    launch_resolved "$@"
+}
+
+# `ccs with <provider>[/<model>] [claude args...]` — one launch with that
+# provider, leaving `active` and [_defaults] exactly as they are. The split
+# is at the first slash, so a model id with slashes of its own
+# (openrouter/anthropic/claude-sonnet-4) comes through intact.
+cmd_with() {
+    [ $# -ge 1 ] || die "Usage: ccs with <provider>[/<model>] [claude args...]"
+    local target="$1" provider model=""
+    shift
+    case "$target" in
+        */*) provider=${target%%/*}; model=${target#*/} ;;
+        *)   provider="$target" ;;
+    esac
+
+    launch_prepare
+    if [ -z "${PROVIDERS+x}" ]; then
+        parse_config
+    fi
+    validate_provider "$provider"
+    if is_native "$provider"; then
+        [ -z "$model" ] || die "Provider '$provider' is the native login and takes no model — claude picks its own (use /model inside it)."
+    else
+        validate_api_key "$provider"
+    fi
+    resolve_provider "$provider" "$model"
+    launch_resolved "$@"
+}
+
+# The tail of every launch: exec claude with whatever ACTIVE_* now holds.
+launch_resolved() {
     # Verify claude is available
     if ! command -v claude >/dev/null 2>&1; then
         die "claude command not found. Install Claude Code first."
@@ -1173,6 +1211,8 @@ Minimal provider switching for Claude Code
 ${C_BOLD}USAGE${C_RESET}
     ccs [args...]               Launch claude with active provider (default)
                                 (vanilla claude if nothing is configured)
+    ccs with <provider>[/<model>] [args...]
+                                One launch with that provider, nothing saved
     ccs <command> [arguments]
 
 ${C_BOLD}LAUNCH FLAGS${C_RESET}
@@ -1190,6 +1230,7 @@ ${C_BOLD}COMMANDS${C_RESET}
                                 Set one value; no value = read it from stdin,
                                 hidden when that is a terminal
     launch [args...]            Launch claude with active provider env vars
+    with <provider>[/<model>]   Launch once with another provider (see USAGE)
     env                         Print export statements for current shell
     models [refresh|clear]      Show / refresh the context windows ccs will use
     notify on|off|status|test   Desktop notifications when Claude needs you
@@ -1221,6 +1262,8 @@ ${C_BOLD}EXAMPLES${C_RESET}
     ccs use openrouter gpt-4o          Switch to OpenRouter with specific model
     ccs config set zai api_key         Paste a key, hidden, no shell history
     ccs --print "hello"                Launch with extra claude flags
+    ccs with deepseek -p "review"      One launch with DeepSeek, default unchanged
+    ccs with openrouter/openai/gpt-4o  Provider/model: split at the first slash
     eval "\$(ccs env)"                  Export vars to current shell
     ccs models                         Show the context window per model tier
     ccs notify on                      Notify on task end + questions (needs jq)
@@ -2899,6 +2942,9 @@ main() {
             ;;
         launch|run)
             cmd_launch "$@"
+            ;;
+        with)
+            cmd_with "$@"
             ;;
         env)
             cmd_env
