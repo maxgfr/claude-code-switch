@@ -83,7 +83,11 @@
 - The two token-limit vars are appended to `exec env` as unquoted words that expand to nothing when
   unknown — safe only because `is_uint` guarantees they are digits-only (`# shellcheck disable=SC2086`)
 - Config values stored in `cfg_<section>_<key>` shell variables, retrieved via `get_cfg()`;
-  `config_set()` writes one back (awk, creates the section when missing)
+  `config_set()` writes one back (awk, creates the section when missing). **Values reach awk
+  through `ENVIRON`, never `-v`**: a `-v` assignment gets escape processing, so a value containing
+  `\n` was written as a real newline and split the `key=value` line in two, leaving a malformed
+  config and a credential truncated at the first backslash. `write_defaults` follows the same rule.
+  Section and key stay `-v` — they are regex operands, already restricted by `valid_ident`
 - **Sections starting with `_` are reserved** (`[_defaults]`, `[_sync]`): parsed into `cfg_*` like
   any other but never added to `$PROVIDERS`, so they stay out of `ccs list` and `ccs use`. Adding a
   new settings section means picking a `_` name, nothing else
@@ -108,8 +112,9 @@ config.template     # Default config with all providers
 test.sh             # Integration test suite (run in CI, hermetic: stubs llm-models)
 .releaserc          # semantic-release config
 .version-hook.sh    # Injects version into ccs during release
-.github/workflows/  # release.yml (semantic-release on push to main)
-                    # test.yml (test.sh + shellcheck on PRs, ubuntu + macos)
+.github/workflows/  # test.yml — one CI workflow: test.sh + shellcheck (ubuntu + macos),
+                    # the real systemd-inhibit job, then semantic-release behind
+                    # `needs` so a red suite cannot publish
 ```
 
 ## Commands
@@ -160,6 +165,17 @@ config.
 - **Never fatal, and never silently useless.** No `caffeinate` / `systemd-inhibit` /
   `gnome-session-inhibit`, or an OS ccs doesn't know (Git Bash reports `MINGW64_NT-*`, Cygwin
   `CYGWIN_NT-*`, BSD its own) → `warn` once and launch anyway. Same contract as `llm-models`
+- **Present is not permitted, so the wrapper is probed.** It becomes the `exec`ed program, so one
+  that exits on a refused lock takes claude down with it — and a headless or container Linux box
+  refuses every time, which made `caffeine on` mean "claude never runs". `caffeine_resolve` runs
+  `$CAFFEINE_CMD sleep 0` once and drops the wrapper if that fails. `sleep 0` rather than `true`:
+  the wrapper execs what it is given and a trimmed PATH may carry no `true` binary, which would
+  read as a refusal. Return codes are now three-valued — 0 resolved, 1 nothing installed, 2 the
+  branch already explained itself (WSL, or a refusal) — so callers never print a second,
+  contradictory warning. `ccs doctor` reuses the same function and so stops reporting `ok` for a
+  wrapper that cannot work
+- **A refusal mid-wait must not kill a pending relaunch.** `relaunch_wait` falls back to a plain
+  `sleep`; under `set -e` the wrapper's non-zero status used to end ccs silently, hours in
 - **WSL is special-cased** because it is the one platform that would look like it worked: `uname -s`
   says `Linux` and `systemd-inhibit` may well exist, but a Linux VM has no reach into the Windows
   host's power management, so the host sleeps regardless. Detected via `microsoft` in
@@ -208,14 +224,23 @@ config.
   removed right after it is read
 - **Detection** (`relaunch_detect`): last line matching `limit.*reset` after stripping CR and ANSI,
   then only the text **after the last "reset"** is parsed — a "3pm" in the conversation must not win.
+  `limit.*reset` alone is not enough: "your GitHub API rate limit resets at 3pm" ends a perfectly
+  successful session and used to buy a 22-hour wait and a second, unwanted session. The line must
+  also carry the shape of a message about the user's own allowance (`hit your … limit`,
+  `usage limit`, `limit reached`) and must not be the `approaching` warning, which is mid-session.
   Returns 1 = no limit message (exit with claude's status), 2 = message but no readable time (warn,
   then exit with the status). Clock `H[:MM]am|pm`, optional `Mon D` (weekly wording), optional
   `(Area/City)` zone
 - **Date maths** (`relaunch_target`): BSD forms first — `date -r`, `date -j -f` — GNU `-d` second,
   because GNU `-d` on BSD would try to set the kernel DST flag. Seconds are pinned to `:00`: BSD
   `-j` fills any field absent from the format with the current time (found the hard way).
-  `env ${tz:+"TZ=$tz"}` because `TZ=""` means UTC, not local. A past time rolls to the next day
-  (or next year with a date). `CCS_RELAUNCH_NOW` freezes "now" **for the test suite only**, same
+  `env ${tz:+"TZ=$tz"}` because `TZ=""` means UTC, not local. **A past time usually means the
+  message was read late, not that the reset is far away**: the recording is always parsed after the
+  session ended, so the user quitting after the printed reset is the ordinary case. A dated reset
+  in the past now relaunches immediately — the old +1 year turned an hour of lateness into 365 days
+  of waiting. A clock-only reset still rolls to tomorrow, since "resets 1am" said at 11pm really is
+  tomorrow, but only while the roll lands within `RELAUNCH_STALE_AFTER` (6 h); the window it belongs
+  to is a few hours wide, so anything further out is a stale message and relaunches now. `CCS_RELAUNCH_NOW` freezes "now" **for the test suite only**, same
   contract as `CCS_OSRELEASE`
 - **Wait** (`relaunch_wait`): 30 s chunks, each one `$CAFFEINE_CMD sleep N` — the wait is exactly
   when the machine must not sleep, so it is wrapped like claude is. Off, ccs warns that the wait
@@ -249,6 +274,15 @@ config.
   `sync_strip_ccs_hooks` / `sync_reattach_ccs_hooks` keep machine-local hook paths out of the remote
 - `sync_scan_secrets` gates every push (`--force` overrides). In the auto path it returns 3 and the
   launch continues
+- **A remote names paths, not just files.** In gist mode `%2F` decodes to `/`, so an entry called
+  `..%2F..%2F.bashrc` used to walk out of the staging tree and write there — before `sync import`
+  had even asked. `sync_path_is_contained` refuses any decoded name that is absolute or contains a
+  `..` component, and `sync_materialize` applies it to every listed file. The unflatten loop also
+  tolerates a failing entry instead of abandoning the rest of the restore
+- **`git ls-files` must be asked for real names.** `core.quotePath` is on by default, so a path
+  with any non-ASCII byte comes back as `"skills/caf\303\251/SKILL.md"`. `cp` then missed a file
+  that was really there, the pull dropped it and the next push deleted it from the remote as well.
+  Every `ls-files` call passes `-c core.quotePath=false`
 - Mirror is the default (`prune=true`); `--additive` / `prune=false` only ever adds. `sync_apply`
   is the **only** function that writes into `~/.claude`, and `sync_backup_claude` always runs first
 - `sync_stage` returns 1 (not `die`) when `~/.claude` has nothing to back up, so `sync status`
@@ -326,11 +360,15 @@ config.
 
 ## Release process
 
-Automated via semantic-release on push to `main`:
-1. Conventional commit → version bump
-2. `.version-hook.sh` injects version into `ccs`
-3. GitHub release created
-4. `homebrew-tap` daily cron auto-updates the formula SHA256
+Automated via semantic-release on push to `main`, as the last job of the CI workflow:
+1. `test` (both runners) and `keepawake` pass — `needs` makes this a gate, not a hope
+2. Conventional commit → version bump
+3. `.version-hook.sh` injects version into `ccs`
+4. GitHub release created
+5. `homebrew-tap` daily cron auto-updates the formula SHA256
+
+Releasing used to be its own workflow on the same `push`, which is a race rather than a
+stage: 1.8.0 and 1.8.1 both shipped from commits whose test suite was red.
 
 ## Conventions
 

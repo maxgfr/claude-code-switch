@@ -1738,6 +1738,111 @@ assert_contains "the rest of ccs still works without git" "CLAUDE_RAN" "$out"
 rm -rf "$NOGIT_DIR" "$SHIM_DIR"
 teardown
 
+# --- Regressions -----------------------------------------------------------
+# Each block below fails on the version of ccs that shipped before it.
+
+# -- A remote cannot write outside the tree it is restored into --
+printf '\033[1m[regression: gist paths stay inside the tree]\033[0m\n'
+sync_setup
+EVIL="$TEST_CONFIG_DIR/evil"
+mkdir -p "$EVIL"
+( cd "$EVIL" && git init -q -b main . && printf 'kind=gist\n' > .ccs-sync
+  # %2F decodes to /, so these names decode to paths that walk out of the tree
+  printf 'PWNED\n' > '..%2F..%2F..%2Fescaped.txt'
+  printf 'PWNED\n' > '..%2Fsibling.txt'
+  printf 'kept\n'  > 'agents%2Fkeep.md'
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm evil >/dev/null 2>&1 )
+git clone -q --bare "$EVIL" "$TEST_CONFIG_DIR/evil.git" 2>/dev/null
+out=$("$CCS" sync import "file://$TEST_CONFIG_DIR/evil.git" --yes 2>&1 || true)
+assert_contains "an escaping entry is refused by name" "escapes the tree" "$out"
+assert_eq "and nothing is written outside the tree" "" \
+    "$(find "$TEST_CONFIG_DIR" \( -name 'escaped.txt' -o -name 'sibling.txt' \) 2>/dev/null)"
+assert_eq "while a well-behaved entry in the same remote is applied" "kept" \
+    "$(cat "$CLAUDE_HOME/agents/keep.md" 2>/dev/null || true)"
+teardown
+
+# -- Non-ASCII filenames survive a round trip --
+printf '\033[1m[regression: accented filenames]\033[0m\n'
+sync_setup
+make_claude_home
+mkdir -p "$CLAUDE_HOME/skills/café"
+printf 'accented\n' > "$CLAUDE_HOME/skills/café/SKILL.md"
+sync_init_repo
+"$CCS" sync push >/dev/null 2>&1
+rm -rf "$CLAUDE_HOME/skills"
+"$CCS" sync pull >/dev/null 2>&1
+assert_eq "git's quoted path does not drop the file on pull" "accented" \
+    "$(cat "$CLAUDE_HOME/skills/café/SKILL.md" 2>/dev/null || true)"
+"$CCS" sync push >/dev/null 2>&1
+assert_contains "and the next push does not delete it from the remote" \
+    "skills/caf" "$(remote_files)"
+teardown
+
+# -- config set stores the bytes it was given --
+printf '\033[1m[regression: config set escapes]\033[0m\n'
+setup
+"$CCS" config set zai api_key 'abc\ndef\tghi\\jkl' >/dev/null 2>&1
+assert_eq "a backslash in a value is not interpreted by awk" 'abc\ndef\tghi\\jkl' \
+    "$("$CCS" config get zai api_key)"
+assert_eq "and the config keeps one line per key" "1" \
+    "$(grep -c '^api_key=abc' "$TEST_CONFIG_DIR/.claude-provider/config" | tr -d ' ')"
+teardown
+
+# -- A keep-awake tool that refuses still lets claude run --
+printf '\033[1m[regression: refused sleep assertion]\033[0m\n'
+setup
+REF_DIR=$(mktemp -d)
+for b in sh sed awk grep find mkdir rm mv cp cat printf date chmod ls id uname \
+         head tail tr wc sort stat env dirname basename cut touch sleep expr; do
+    p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$REF_DIR/$b"
+done
+# Present on PATH, and refuses every lock — a headless Linux box, or a
+# container: logind hands out no inhibitor locks there.
+printf '#!/bin/sh\necho "Failed to inhibit: Access denied" >&2\nexit 1\n' > "$REF_DIR/caffeinate"
+printf '#!/bin/sh\necho "Failed to inhibit: Access denied" >&2\nexit 1\n' > "$REF_DIR/systemd-inhibit"
+printf '#!/bin/sh\necho "CLAUDE_RAN:$*"\n' > "$REF_DIR/claude"
+chmod +x "$REF_DIR/caffeinate" "$REF_DIR/systemd-inhibit" "$REF_DIR/claude"
+"$CCS" caffeine on >/dev/null 2>&1
+out=$(PATH="$REF_DIR" "$CCS" launch -p hi 2>&1 || true)
+assert_contains "the launch is not taken down with the wrapper" "CLAUDE_RAN:" "$out"
+assert_contains "and says why it is not caffeinated" "cannot take a sleep assertion" "$out"
+out=$(PATH="$REF_DIR" "$CCS" doctor 2>&1 || true)
+assert_contains "doctor reports it instead of a bare ok" "no keep-awake tool works here" "$out"
+"$CCS" caffeine off >/dev/null 2>&1
+rm -rf "$REF_DIR"
+teardown
+
+# -- Relaunch only fires on a real usage limit, at a real time --
+printf '\033[1m[regression: relaunch false positives]\033[0m\n'
+setup
+RG_DIR=$(mktemp -d)
+# A successful session that merely talks about some other service's limits
+printf '#!/bin/sh\necho "Your GitHub API rate limit resets at 3pm UTC."\necho Done.\n' \
+    > "$RG_DIR/claude"
+chmod +x "$RG_DIR/claude"
+out=$(PATH="$RG_DIR:$PATH" "$CCS" --relaunch -p hi 2>&1 || true)
+assert_not_contains "ordinary text about a rate limit is not a usage limit" \
+    "relaunching" "$out"
+assert_contains "and the session just ends" "Done." "$out"
+rm -rf "$RG_DIR"
+
+# A real limit whose reset time has already gone by: relaunch, do not sleep on it
+relaunch_shim "You've hit your session limit · resets 1:10am (Europe/Berlin)"
+# 2026-09-02 03:00 Europe/Berlin — an hour and fifty minutes after the reset
+out=$(CCS_RELAUNCH_NOW=1788310800 PATH="$RL_DIR:$PATH" "$CCS" --relaunch -p hi 2>&1 || true)
+assert_contains "a reset that already passed relaunches now" "has already passed" "$out"
+assert_contains "and the session is actually continued" "RESUMED:" "$out"
+rm -rf "$RL_DIR"
+
+relaunch_shim "You've hit your weekly limit · resets Sep 5 at 9am (Europe/Berlin)"
+# 2026-09-05 10:00 Europe/Berlin — an hour after the weekly reset
+out=$(CCS_RELAUNCH_NOW=1788595200 PATH="$RL_DIR:$PATH" "$CCS" --relaunch -p hi 2>&1 || true)
+assert_contains "a dated reset that passed does not wait a year" "has already passed" "$out"
+assert_contains "and it too is continued" "RESUMED:" "$out"
+rm -rf "$RL_DIR"
+teardown
+
 # -- Summary --
 TOTAL=$((PASS + FAIL))
 printf '\n\033[1m=== Results: %d/%d passed ===\033[0m\n' "$PASS" "$TOTAL"

@@ -33,6 +33,10 @@ RELAUNCH_LOG=""                               # where that run's output was reco
 # "Now" for the reset-time maths. Overridable only so the test suite can wait
 # two seconds instead of until 1:10am — there is no reason to set it.
 CCS_RELAUNCH_NOW="${CCS_RELAUNCH_NOW:-}"
+# A clock-only reset belongs to a window a few hours wide. Once a roll to
+# tomorrow lands further out than this, the message was read late and the reset
+# has already happened — relaunch instead of sleeping through the day.
+RELAUNCH_STALE_AFTER=21600                    # 6 hours
 
 # --- Sync constants ---
 SYNC_DIR="${CONFIG_DIR}/sync"                 # git working copy mirroring the remote
@@ -826,7 +830,10 @@ config_set_cmd() {
 write_defaults() {
     local provider="$1" model="$2" tmpfile
     tmpfile=$(mktemp)
-    awk -v p="$provider" -v m="$model" '
+    # Through the environment, not `-v`: see the note on config_set. A model id
+    # is remote-supplied text and must reach the file as the bytes it is.
+    CCS_DEF_PROVIDER="$provider" CCS_DEF_MODEL="$model" awk '
+        BEGIN { p = ENVIRON["CCS_DEF_PROVIDER"]; m = ENVIRON["CCS_DEF_MODEL"] }
         /^[ \t]*\[_defaults\][ \t]*$/     { in_d = 1; print; next }
         /^[ \t]*\[/                       { in_d = 0; print; next }
         in_d && /^[ \t]*provider[ \t]*=/  { print "provider=" p; next }
@@ -897,7 +904,7 @@ caffeine_resolve() {
             # sleeps anyway. Say so instead of pretending it worked.
             if grep -qi microsoft "$CCS_OSRELEASE" 2>/dev/null; then
                 warn "WSL cannot keep the Windows host awake — set it in Windows' power settings"
-                return 1
+                return 2
             fi
             if command -v systemd-inhibit >/dev/null 2>&1; then
                 # sleep blocks suspend; idle also blocks the idle timer that
@@ -913,7 +920,23 @@ caffeine_resolve() {
             ;;
     esac
 
-    [ -n "$CAFFEINE_CMD" ]
+    [ -n "$CAFFEINE_CMD" ] || return 1
+
+    # Present is not the same as permitted. The wrapper becomes the exec'd
+    # program, so one that exits on a refused lock takes claude down with it —
+    # and a headless or container Linux box refuses every time (no logind
+    # session, no polkit), which would make `caffeine on` mean "claude never
+    # runs". Ask it to wrap `true` once; keep it only if that works.
+    # `sleep 0` rather than `true`: the wrapper execs what it is given, and a
+    # trimmed PATH may carry no `true` binary at all, which would read as a
+    # refusal and silently switch keep-awake off.
+    # shellcheck disable=SC2086  # intentional: the words are space-free
+    if ! $CAFFEINE_CMD sleep 0 >/dev/null 2>&1; then
+        warn "${CAFFEINE_CMD%% *} cannot take a sleep assertion here — launching without it"
+        CAFFEINE_CMD=""
+        return 2
+    fi
+    return 0
 }
 
 # The one-line state, shared by `ccs status` and `ccs caffeine status`
@@ -943,7 +966,7 @@ caffeine_env_note() {
 }
 
 caffeine_on() {
-    local mode="${1:-system}"
+    local mode="${1:-system}" rc=0
     case "$mode" in
         system|display) ;;
         *) die "Unknown caffeine mode '$mode'. Usage: ccs caffeine on [system|display]" ;;
@@ -954,10 +977,14 @@ caffeine_on() {
     else
         info "Caffeine on (system) — the machine stays awake while claude runs, the screen may sleep"
     fi
-    if caffeine_resolve "$mode"; then
+    caffeine_resolve "$mode" || rc=$?
+    if [ "$rc" -eq 0 ]; then
         printf '    Wrapper: %s%s%s\n' "${C_BOLD}" "$CAFFEINE_CMD" "${C_RESET}"
     else
-        warn "no keep-awake tool found on this system — sessions will launch, just not caffeinated"
+        # 2 means the branch already said what was wrong; 1 is "nothing installed"
+        if [ "$rc" -eq 1 ]; then
+            warn "no keep-awake tool found on this system — sessions will launch, just not caffeinated"
+        fi
     fi
 }
 
@@ -1088,7 +1115,17 @@ fmt_duration() {
 relaunch_detect() {
     local esc line tail clock mdate tz
     esc=$(printf '\033')
-    line=$(tr -d '\r' < "$1" | sed "s/${esc}\\[[0-9;?]*[A-Za-z]//g" | grep -iE 'limit.*reset' | tail -n 1) || true
+    # `limit.*reset` alone matches ordinary conversation — "your GitHub API
+    # rate limit resets at 3pm" ends a perfectly successful session and used to
+    # buy a 22-hour wait followed by a second, unwanted session. Claude's own
+    # message is about the user's own allowance and says so, so the line must
+    # also carry that shape. `approaching` is excluded because that wording is
+    # a mid-session warning, not a stop.
+    line=$(tr -d '\r' < "$1" | sed "s/${esc}\\[[0-9;?]*[A-Za-z]//g" \
+        | grep -iE 'limit.*reset' \
+        | grep -iE 'hit (your|the)[a-z ]*limit|usage limit|limit reached' \
+        | grep -ivE 'approaching|nearing' \
+        | tail -n 1) || true
     [ -n "$line" ] || return 1
     tail=$(printf '%s' "$line" | sed 's/.*[Rr]eset//')
     clock=$(printf '%s' "$tail" | grep -oE '[0-9]{1,2}(:[0-9]{2})? ?[aApP][mM]' | head -n 1 | tr -d ' ' | tr 'APM' 'apm') || true
@@ -1122,15 +1159,23 @@ relaunch_target() {
         d=${mdate#* }; d=${d#0}
         y=$(date_at "$now" %Y "$tz") || return 1
         t=$(date_to_epoch "$(printf '%s-%02d-%02d %02d:%02d' "$y" "$mon" "$d" "$h" "$m")" "$tz") || return 1
-        if [ "$t" -le "$now" ]; then
-            t=$(date_to_epoch "$(printf '%s-%02d-%02d %02d:%02d' $((y + 1)) "$mon" "$d" "$h" "$m")" "$tz") || return 1
-        fi
+        # A dated reset that has already passed is a message read late, not one
+        # a year away. The recording is always read after the session ended, so
+        # "in the past" is the ordinary case, and the old +1 year turned an hour
+        # of lateness into 365 days of waiting.
+        [ "$t" -gt "$now" ] || t="$now"
     else
         ymd=$(date_at "$now" %Y-%m-%d "$tz") || return 1
         t=$(date_to_epoch "$(printf '%s %02d:%02d' "$ymd" "$h" "$m")" "$tz") || return 1
         if [ "$t" -le "$now" ]; then
+            # Either the reset is tomorrow ("resets 1am", said at 11pm) or it
+            # already happened ("resets 1:10am", quit at 3am). The window it
+            # belongs to is at most a few hours wide, so a roll-forward that
+            # lands further out than RELAUNCH_STALE_AFTER means the message was
+            # simply read late: relaunch now rather than sleep most of a day.
             ymd=$(date_at $((now + 86400)) %Y-%m-%d "$tz") || return 1
             t=$(date_to_epoch "$(printf '%s %02d:%02d' "$ymd" "$h" "$m")" "$tz") || return 1
+            [ $((t - now)) -le "$RELAUNCH_STALE_AFTER" ] || t="$now"
         fi
     fi
     is_uint "$t" || return 1
@@ -1146,8 +1191,11 @@ relaunch_wait() {
     while [ "$rem" -gt 0 ]; do
         chunk="$rem"
         [ "$chunk" -le 30 ] || chunk=30
+        # A wrapper that refuses mid-wait must not abandon the relaunch: under
+        # set -e its non-zero status would kill ccs silently, hours into an
+        # overnight wait. Fall back to sleeping uncaffeinated.
         # shellcheck disable=SC2086  # intentional: empty means "no wrapper"
-        $CAFFEINE_CMD sleep "$chunk"
+        $CAFFEINE_CMD sleep "$chunk" || sleep "$chunk"
         if [ -n "$CCS_RELAUNCH_NOW" ]; then
             now=$((now + chunk))
         else
@@ -1229,9 +1277,13 @@ relaunch_loop() {
         when="$clock"
         [ -z "$mdate" ] || when="$mdate at $clock"
         [ -z "$tz" ] || when="$when ($tz)"
-        info "Usage limit hit — relaunching at ${C_BOLD}${when}${C_RESET}, in $(fmt_duration $((target - now))). Ctrl-C to give up."
-        if [ -z "$CAFFEINE_CMD" ]; then
-            warn "caffeine is off — if the machine sleeps before then, so does the wait (try --caffeine)"
+        if [ "$target" -le "$now" ]; then
+            info "Usage limit hit, and ${C_BOLD}${when}${C_RESET} has already passed — relaunching now."
+        else
+            info "Usage limit hit — relaunching at ${C_BOLD}${when}${C_RESET}, in $(fmt_duration $((target - now))). Ctrl-C to give up."
+            if [ -z "$CAFFEINE_CMD" ]; then
+                warn "caffeine is off — if the machine sleeps before then, so does the wait (try --caffeine)"
+            fi
         fi
         relaunch_wait "$target"
 
@@ -1292,7 +1344,9 @@ launch_prepare() {
 
     # Resolved before load_state so the vanilla fallback is caffeinated too —
     # a missing tool warns and launches anyway, it is never fatal.
-    if ! caffeine_resolve "$(caffeine_mode)"; then
+    local rc=0
+    caffeine_resolve "$(caffeine_mode)" || rc=$?
+    if [ "$rc" -eq 1 ]; then
         warn "no keep-awake tool found on this system — the session will not stay awake"
     fi
 }
@@ -2274,12 +2328,20 @@ sync_require_remote() {
 }
 
 # Set (or add) key=value inside a config section, creating the section if needed
+#
+# The value arrives through the environment, never `awk -v`: POSIX awk applies
+# escape processing to a `-v` assignment, so a key containing a literal `\n`
+# would be written as a real newline and split the `key=value` line in two —
+# leaving a malformed config and a credential silently truncated at the first
+# backslash. `ENVIRON` hands the bytes over untouched. The section and key are
+# regex operands, and `valid_ident` has already restricted them to the parser's
+# alphabet, so those stay as `-v`.
 config_set() {
     local section="$1" key="$2" value="$3" tmp
     require_config
     tmp=$(mktemp)
-    awk -v sec="$section" -v k="$key" -v v="$value" '
-        BEGIN { srx = "^[ \t]*\\[" sec "\\][ \t]*$"; krx = "^[ \t]*" k "[ \t]*=" }
+    CCS_SET_VALUE="$value" awk -v sec="$section" -v k="$key" '
+        BEGIN { v = ENVIRON["CCS_SET_VALUE"]; srx = "^[ \t]*\\[" sec "\\][ \t]*$"; krx = "^[ \t]*" k "[ \t]*=" }
         $0 ~ srx { in_s = 1; seen = 1; print; next }
         /^[ \t]*\[/ {
             if (in_s && !done) { print k "=" v; done = 1 }
@@ -2449,13 +2511,37 @@ sync_flatten_tree() {
     return 0
 }
 
+# A decoded name must stay inside the tree it is being written into.
+#
+# `%2F` becomes `/`, so a remote is choosing a path, not just a filename. An
+# entry named `..%2F..%2F.bashrc` decodes to a path that walks out of the
+# staging directory and writes wherever it lands — before `sync import` has
+# even asked "Apply this to ~/.claude?". Every component is checked, not just
+# the first: `a/../../b` is as much an escape as `../b`. Absolute paths are
+# refused for the same reason.
+sync_path_is_contained() {
+    case "$1" in
+        /*|'') return 1 ;;
+        ..|../*|*/..|*/../*) return 1 ;;
+    esac
+    return 0
+}
+
 sync_unflatten_tree() {
     local root="$1"
     ( cd "$root" || exit 1
       find . -maxdepth 1 -type f -name '*%2F*' | sed 's|^\./||' | while IFS= read -r name; do
           dec=$(printf '%s' "$name" | sed 's/%2F/\//g; s/%25/%/g')
-          mkdir -p "$(dirname "$dec")"
-          mv "$name" "$dec"
+          if ! sync_path_is_contained "$dec"; then
+              warn "ignoring remote entry that escapes the tree: $dec"
+              rm -f "$name"
+              continue
+          fi
+          # One bad entry must not truncate the restore: this loop is a
+          # pipeline subshell under set -e, where the first failure would
+          # otherwise abandon every entry after it.
+          mkdir -p "$(dirname "$dec")" 2>/dev/null || continue
+          mv "$name" "$dec" 2>/dev/null || continue
       done
       exit 0 )
     return 0
@@ -2479,7 +2565,7 @@ sync_detect_kind() {
     k=$(sed -n 's/^kind=//p' "${repo}/${SYNC_MANIFEST}" 2>/dev/null | head -1) || k=""
     if [ -n "$k" ]; then
         printf '%s' "$k"
-    elif ( cd "$repo" && git ls-files ) 2>/dev/null | grep -q '%2F'; then
+    elif ( cd "$repo" && git -c core.quotePath=false ls-files ) 2>/dev/null | grep -q '%2F'; then
         printf 'gist'
     else
         printf 'repo'
@@ -2600,12 +2686,20 @@ sync_push_remote() {
 }
 
 # Reconstruct the real tree from a checkout, without touching the checkout
+#
+# `core.quotePath` is on by default, so a path with any non-ASCII byte comes
+# back from `git ls-files` as `"skills/caf\303\251/SKILL.md"` — quotes and
+# octal escapes included. `cp` then misses a file that is really there, `||
+# true` hides it, the pull drops it, and the next push deletes it from the
+# remote as well. `-c core.quotePath=false` is what makes the listing name the
+# files that exist.
 sync_materialize() {
     local repo="$1" dest="$2" kind="$3" f
     rm -rf "$dest"
     mkdir -p "$dest"
-    ( cd "$repo" && git ls-files ) 2>/dev/null | while IFS= read -r f; do
+    ( cd "$repo" && git -c core.quotePath=false ls-files ) 2>/dev/null | while IFS= read -r f; do
         [ -n "$f" ] || continue
+        sync_path_is_contained "$f" || continue
         mkdir -p "${dest}/$(dirname "$f")"
         cp -p "${repo}/${f}" "${dest}/${f}" 2>/dev/null || true
     done
