@@ -2003,11 +2003,17 @@ cmd_purge() {
     # Detach every ccs hook first — otherwise ~/.claude/settings.json would
     # reference scripts that no longer exist.
     if [ -f "$CLAUDE_SETTINGS" ] && grep -qF "$CCS_HOOK_MARKER" "$CLAUDE_SETTINGS" 2>/dev/null; then
-        if command -v jq >/dev/null 2>&1; then
+        if ! command -v jq >/dev/null 2>&1; then
+            warn "jq not found — remove the ccs hooks from $CLAUDE_SETTINGS manually"
+        elif ! jq empty "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+            # The guard is a grep for the marker, so a hand-edited file with a
+            # trailing comma still reaches jq — which exits non-zero and, under
+            # set -e, used to kill purge before it removed anything. "All ccs
+            # data removed" then removed none of it, over a bare jq diagnostic.
+            warn "$CLAUDE_SETTINGS is not valid JSON — remove the ccs hooks from it manually"
+        else
             notify_off
             settings_detach_hooks "$CCS_HOOK_MARKER" SessionStart SessionEnd
-        else
-            warn "jq not found — remove the ccs hooks from $CLAUDE_SETTINGS manually"
         fi
     fi
     rm -rf "$CONFIG_DIR"
@@ -2415,6 +2421,16 @@ sync_copy_tree() {
         sed 's/^/    /' "$err" >&2
     fi
     rm -f "$err"
+    # A skill directory that is itself a git checkout — or a symlink into one,
+    # which is the routine case for `skills/` — arrives here with its `.git`
+    # intact, because `tar -ch` dereferences the link and copies everything.
+    # `git add -A` on the staging tree then records that directory as a 160000
+    # gitlink and pushes no file content at all: the push reports success while
+    # the remote holds nothing, and a restore on a fresh machine leaves the
+    # directory empty. Files are what is being backed up, so the nested
+    # repository's own metadata is dropped. `-mindepth 2` is what keeps ccs's
+    # own working copy at "$dst/.git".
+    find "$dst" -mindepth 2 -name .git -prune -exec rm -rf {} + 2>/dev/null || true
     return 0
 }
 
@@ -2733,7 +2749,14 @@ sync_apply() {
                 rm -rf "${CLAUDE_DIR:?}/${p}"
             fi
             mkdir -p "$(dirname "${CLAUDE_DIR}/${p}")"
-            ( cd "$tree" && tar -cf - "$p" ) | ( cd "$CLAUDE_DIR" && tar -xf - )
+            # Additive restores extract over whatever is already there, and one
+            # path can legitimately refuse — bsdtar will not extract through a
+            # directory symlink. Under set -e that killed the loop midway, so
+            # every path after it was silently skipped, the ccs hooks were never
+            # reattached and the temp tree leaked. Report the path and carry on.
+            if ! ( cd "$tree" && tar -cf - "$p" ) | ( cd "$CLAUDE_DIR" && tar -xf - ); then
+                warn "could not restore $p — left as it was"
+            fi
         elif [ "$prune" = "true" ] && [ -e "${CLAUDE_DIR}/${p}" ]; then
             rm -rf "${CLAUDE_DIR:?}/${p}"
         fi

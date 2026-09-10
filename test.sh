@@ -1843,6 +1843,52 @@ assert_contains "and it too is continued" "RESUMED:" "$out"
 rm -rf "$RL_DIR"
 teardown
 
+# -- A skill that is a git checkout is backed up as files, not a gitlink --
+printf '\033[1m[regression: nested git checkouts]\033[0m\n'
+sync_setup
+make_claude_home
+EXT="$TEST_CONFIG_DIR/external"
+mkdir -p "$EXT/myskill"
+printf 'name: mine\n' > "$EXT/myskill/SKILL.md"
+( cd "$EXT" && git init -q -b main . && git add -A >/dev/null 2>&1 &&
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1 )
+# The routine case: skills/ is a link into another checkout.
+ln -s "$EXT" "$CLAUDE_HOME/skills/linked"
+# And the same thing without a link, a checkout sitting directly in skills/.
+mkdir -p "$CLAUDE_HOME/skills/direct"
+printf 'name: direct\n' > "$CLAUDE_HOME/skills/direct/SKILL.md"
+( cd "$CLAUDE_HOME/skills/direct" && git init -q -b main . && git add -A >/dev/null 2>&1 &&
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1 )
+sync_init_repo
+"$CCS" sync push >/dev/null 2>&1
+files=$(remote_files)
+assert_contains "a linked checkout is backed up as its files" \
+    "./skills/linked/myskill/SKILL.md" "$files"
+assert_contains "so is a checkout sitting directly under skills" \
+    "./skills/direct/SKILL.md" "$files"
+assert_eq "and no directory is stored as an empty gitlink" "" \
+    "$(cd "$TEST_CONFIG_DIR/verify" && git ls-files -s | awk '$1 == "160000" { print $4 }')"
+rm -rf "$CLAUDE_HOME/skills"
+"$CCS" sync pull >/dev/null 2>&1
+assert_eq "a restore on a fresh machine brings the files back" "name: mine" \
+    "$(cat "$CLAUDE_HOME/skills/linked/myskill/SKILL.md" 2>/dev/null || true)"
+teardown
+
+# -- purge finishes even when settings.json cannot be parsed --
+printf '\033[1m[regression: purge over invalid settings.json]\033[0m\n'
+setup
+"$CCS" notify on ghostty >/dev/null 2>&1
+# A hand-edited file with a trailing comma still carries the ccs hook marker,
+# so the grep guard lets it through to jq.
+printf '{ "hooks": { "Stop": [ { "hooks": [ { "command": "%s/.claude-provider/hooks/notify-stop.sh" } ] } ], }\n' \
+    "$TEST_CONFIG_DIR" > "$TEST_CONFIG_DIR/.claude/settings.json"
+out=$("$CCS" purge 2>&1 || true)
+assert_contains "purge says why it cannot detach the hooks" "not valid JSON" "$out"
+assert_contains "and still purges" "all ccs data removed" "$out"
+assert_eq "so the config directory is really gone" "false" \
+    "$([ -d "$TEST_CONFIG_DIR/.claude-provider" ] && echo true || echo false)"
+teardown
+
 # -- Summary --
 TOTAL=$((PASS + FAIL))
 printf '\n\033[1m=== Results: %d/%d passed ===\033[0m\n' "$PASS" "$TOTAL"

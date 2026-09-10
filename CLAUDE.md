@@ -15,7 +15,10 @@
 1. `ccs notify on|off` edits `~/.claude/settings.json` (hooks + `preferredNotifChannel`). Backed up to `~/.claude-provider/settings-backup.json`, fully reversed by `notify off`. Requires jq.
 2. `ccs sync pull|import` writes into `~/.claude`, restricted to `$SYNC_PATHS`; `ccs sync hooks on` adds `SessionStart`/`SessionEnd` entries to `~/.claude/settings.json`. Every write is preceded by a snapshot into `~/.claude-provider/sync-backup/<timestamp>/`. Requires git.
 
-`purge` detaches both hook families before deleting anything.
+`purge` detaches both hook families before deleting anything — but never lets that stop it. The
+guard is a `grep` for the hook marker, so a hand-edited `settings.json` with a trailing comma still
+reaches `jq`, which exits non-zero and used to kill `purge` under `set -e` before it removed a
+thing. It now checks validity first and says what the user has to clean up by hand.
 
 ## Architecture
 
@@ -272,6 +275,16 @@ config.
   by walking `~/.claude`: `tar -ch` dereferences symlinks (`skills/` is routinely links into
   another checkout), `sync_rewrite_home` swaps `$HOME` for `__CCS_HOME__` and back, and
   `sync_strip_ccs_hooks` / `sync_reattach_ccs_hooks` keep machine-local hook paths out of the remote
+- **Dereferencing brings the nested `.git` with it.** A skill directory that is a checkout, or a
+  link into one, used to be recorded by `git add -A` as a `160000` gitlink holding no file content:
+  the push said "Backed up", the remote held nothing, and a restore left the directory empty.
+  `sync_copy_tree` drops nested `.git` entries from the copy at `-mindepth 2`, which is what keeps
+  ccs's own working copy at `$SYNC_DIR/.git`. Files are the thing being backed up; the nested
+  repository's history is not
+- **One path may refuse to extract.** `sync_apply`'s additive branch extracts over what is already
+  there, and bsdtar will not extract through a directory symlink. Under `set -e` that ended the
+  `SYNC_PATHS` loop midway — every later path skipped, hooks never reattached, temp tree leaked —
+  so the failure is now reported per path and the loop continues
 - `sync_scan_secrets` gates every push (`--force` overrides). In the auto path it returns 3 and the
   launch continues
 - **A remote names paths, not just files.** In gist mode `%2F` decodes to `/`, so an entry called
