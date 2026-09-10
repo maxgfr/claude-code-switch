@@ -8,7 +8,8 @@ Contributions are welcome! Here's how you can help:
 2. Clone your fork: `git clone https://github.com/your-username/claude-code-switch.git`
 3. Create a branch: `git checkout -b feat/my-feature`
 4. Make your changes
-5. Test your changes: `./ccs help && ./ccs list`
+5. Test your changes: `./test.sh` — the full suite, which is also what CI runs.
+   `shellcheck -s sh -e SC3043 ccs test.sh` catches what CI's lint step would
 6. Commit using [conventional commits](https://www.conventionalcommits.org/): `git commit -m "feat: add new provider"`
 7. Push and open a Pull Request
 

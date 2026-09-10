@@ -1,10 +1,13 @@
-name: Test
+name: CI
 
 on:
   push:
     branches:
       - main
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -85,3 +88,31 @@ jobs:
               exit 1
           fi
           echo "OK"
+
+  # Releasing lives here, behind `needs`, because a separate workflow on the
+  # same `push` is not a stage — it is a race. Both 1.8.0 and 1.8.1 were
+  # published from commits whose test suite had gone red, because the Release
+  # workflow never looked at it.
+  release:
+    name: Release
+    needs: [test, keepawake]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Release
+        uses: cycjimmy/semantic-release-action@v6
+        with:
+          extra_plugins: |
+            @semantic-release/exec
+            @semantic-release/git
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
