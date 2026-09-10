@@ -33,6 +33,13 @@ RELAUNCH_LOG=""                               # where that run's output was reco
 # "Now" for the reset-time maths. Overridable only so the test suite can wait
 # two seconds instead of until 1:10am — there is no reason to set it.
 CCS_RELAUNCH_NOW="${CCS_RELAUNCH_NOW:-}"
+# Every variable ccs manages, as `env -u` words. One list so the native launch
+# and the vanilla fallback can never drift apart: both claim to run claude as
+# claude, and both have to mean it.
+CCS_SCRUB="-u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL \
+-u ANTHROPIC_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL \
+-u ANTHROPIC_DEFAULT_HAIKU_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL -u ANTHROPIC_SMALL_FAST_MODEL \
+-u CLAUDE_CODE_MAX_CONTEXT_TOKENS -u CLAUDE_CODE_MAX_OUTPUT_TOKENS"
 # A clock-only reset belongs to a window a few hours wide. Once a roll to
 # tomorrow lands further out than this, the message was read late and the reset
 # has already happened — relaunch instead of sleeping through the day.
@@ -1330,9 +1337,13 @@ launch_vanilla() {
         die "claude command not found. Install Claude Code first."
     fi
     warn "no provider configured — launching vanilla claude (run 'ccs use <provider>' to switch)"
-    # Keep awake still applies: it is about the machine, not about the provider.
-    # shellcheck disable=SC2086  # intentional: empty means "no wrapper"
-    launch_run $CAFFEINE_CMD claude "$@"
+    # Scrubbed like the native branch, and for the same reason: a leftover
+    # `eval "$(ccs env)"` for another provider would otherwise win silently,
+    # and this path announces vanilla claude while sending the session to that
+    # provider's endpoint on that provider's token. Keep awake still applies —
+    # it is about the machine, not about the provider.
+    # shellcheck disable=SC2086  # intentional: fixed words, empty means "no wrapper"
+    launch_run env $CCS_SCRUB $CAFFEINE_CMD claude "$@"
 }
 
 # Everything a launch does before the provider matters, shared by `ccs`,
@@ -1406,20 +1417,8 @@ launch_resolved() {
         else
             info "Launching claude ${C_DIM}(native login)${C_RESET}"
         fi
-        # shellcheck disable=SC2086  # intentional: empty means "no wrapper"
-        launch_run env \
-            -u ANTHROPIC_API_KEY \
-            -u ANTHROPIC_AUTH_TOKEN \
-            -u ANTHROPIC_BASE_URL \
-            -u ANTHROPIC_MODEL \
-            -u ANTHROPIC_DEFAULT_OPUS_MODEL \
-            -u ANTHROPIC_DEFAULT_SONNET_MODEL \
-            -u ANTHROPIC_DEFAULT_HAIKU_MODEL \
-            -u CLAUDE_CODE_SUBAGENT_MODEL \
-            -u ANTHROPIC_SMALL_FAST_MODEL \
-            -u CLAUDE_CODE_MAX_CONTEXT_TOKENS \
-            -u CLAUDE_CODE_MAX_OUTPUT_TOKENS \
-            $CAFFEINE_CMD claude "$@"
+        # shellcheck disable=SC2086  # intentional: fixed words, empty means "no wrapper"
+        launch_run env $CCS_SCRUB $CAFFEINE_CMD claude "$@"
     fi
 
     load_limits "$ACTIVE_PROVIDER" "$ACTIVE_MODEL" "$ACTIVE_BASE_URL"

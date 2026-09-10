@@ -1889,6 +1889,30 @@ assert_eq "so the config directory is really gone" "false" \
     "$([ -d "$TEST_CONFIG_DIR/.claude-provider" ] && echo true || echo false)"
 teardown
 
+# -- Vanilla means vanilla, even after an eval for another provider --
+printf '\033[1m[regression: vanilla launch is scrubbed]\033[0m\n'
+setup
+VAN_DIR=$(mktemp -d)
+printf '#!/bin/sh\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE_MAX|CLAUDE_CODE_SUBAGENT)" | sort\n' \
+    > "$VAN_DIR/claude"
+chmod +x "$VAN_DIR/claude"
+# A keyless default provider is the unconfigured-by-accident path.
+"$CCS" config set _defaults provider anthropic >/dev/null 2>&1
+"$CCS" config set anthropic api_key "" >/dev/null 2>&1
+out=$(PATH="$VAN_DIR:$PATH" \
+    ANTHROPIC_BASE_URL=http://stale.example \
+    ANTHROPIC_AUTH_TOKEN=stale-token \
+    ANTHROPIC_DEFAULT_OPUS_MODEL=stale-opus \
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS=999 \
+    "$CCS" -p hi 2>&1 || true)
+assert_contains "the vanilla fallback still says so" "launching vanilla claude" "$out"
+assert_not_contains "a stale endpoint does not survive into it" "stale.example" "$out"
+assert_not_contains "nor a stale token" "stale-token" "$out"
+assert_not_contains "nor a stale tier model" "stale-opus" "$out"
+assert_not_contains "nor a stale context window" "999" "$out"
+rm -rf "$VAN_DIR"
+teardown
+
 # -- Summary --
 TOTAL=$((PASS + FAIL))
 printf '\n\033[1m=== Results: %d/%d passed ===\033[0m\n' "$PASS" "$TOTAL"

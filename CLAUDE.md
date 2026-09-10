@@ -79,6 +79,11 @@ thing. It now checks validity first and says what the user has to clean up by ha
 - POSIX sh compatible (no bash-isms: no `[[ ]]`, no arrays, no `${var//pattern}`)
 - `local` keyword used despite not being strictly POSIX (supported everywhere in practice)
 - `env -u` used in `cmd_launch` to scrub conflicting inherited vars (same spirit as `local`: not strictly POSIX, supported by GNU/BSD/macOS/busybox). Native launch unsets third-party vars and vice versa; `cmd_env` native branch unsets the tier vars a third-party eval may have exported
+- **`$CCS_SCRUB` is that list, written once.** Both the native launch and `launch_vanilla` claim to
+  run claude as claude, so both scrub. `launch_vanilla` used not to, which meant a leftover
+  `eval "$(ccs env)"` for another provider silently won: ccs announced "launching vanilla claude"
+  while the session went to that provider's endpoint, on that provider's token. One list also
+  removes the drift risk between two copies of eleven variable names
 - `ccs -h|--help|-v|--version` are intercepted in `main()` BEFORE the generic `-*` claude passthrough — everything else starting with `-` goes to claude
 - Unconfigured launch (no active provider + no default api_key) falls back to vanilla `claude` with a warning instead of dying (`launch_vanilla()`)
 - `load_state()` is the single place that resolves active state or `[_defaults]`; `cmd_launch`,
