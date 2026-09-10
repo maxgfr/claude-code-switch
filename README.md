@@ -100,14 +100,14 @@ LAUNCH FLAGS
 
 COMMANDS
     use <provider> [model]      Switch to a provider (saves as default)
-    list                        List configured providers
-    status                      Show active provider and model
-    config                      Open config file in $EDITOR
+    list  (ls)                  List configured providers
+    status  (st)                Show active provider and model
+    config  (cfg)               Open config file in $EDITOR
     config get <section> <key>  Print one config value (empty if unset)
     config set <section> <key> [value]
                                 Set one value; no value = read it from stdin,
                                 hidden when that is a terminal
-    launch [args...]            Launch claude with active provider env vars
+    launch  (run) [args...]     Launch claude with active provider env vars
     with <provider>[/<model>]   Launch once with another provider (see above)
     env                         Print export statements for current shell
     models [refresh|clear]      Show / refresh the context windows ccs will use
@@ -127,9 +127,13 @@ SYNC SUBCOMMANDS
     sync init --repo-new <name> Create a private repo and use it (needs gh)
     sync init --gist <id|url>   Use a gist you already have
     sync init --repo <url>      Use a repo you already have
-    sync push [--force]         Back up ~/.claude to the remote
-    sync pull [--additive]      Restore ~/.claude from the remote
-    sync import <id|url>        Import someone else's config (asks first)
+    sync push [--force] [--dry-run]
+                                Back up ~/.claude to the remote
+    sync pull [--additive] [--dry-run]
+                                Restore ~/.claude from the remote
+    sync import <id|owner/repo|url> [--adopt] [--with-ccs] [--additive] [--yes]
+                                Import someone else's config (asks first;
+                                --yes is required when stdin is not a terminal)
     sync status                 Remote, scope, last sync, what would push
     sync auto on|off            Sync on every 'ccs' launch (default: off)
     sync hooks on|off           Sync on Claude Code session start/end

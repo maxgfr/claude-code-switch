@@ -524,8 +524,21 @@ setup
 out=$("$CCS" completion bash)
 # shellcheck disable=SC2016  # expanded by the inner bash, on purpose
 assert_exit "bash completion is valid bash" "0" env BASH_SCRIPT="$out" bash -c 'bash -n <<< "$BASH_SCRIPT"'
-for c in use list status config launch with env models notify caffeine relaunch sync doctor reset purge help version completion; do
-    assert_eq "bash completion knows '$c'" "true" "$(printf '%s' "$out" | grep -qw -- "$c" && echo true || echo false)"
+# Derived from main()'s own case labels, never retyped: a list copied out of
+# the source it is checking is green by construction and cannot notice a
+# command being added. That is how `ls`, `st`, `cfg` and `run` came to be
+# dispatched, absent from $CCS_COMMANDS and from both completion scripts, with
+# this test passing throughout.
+MAIN_WORDS=$(awk '/^main\(\)/, /^}/' "$CCS" \
+    | sed -n 's/^        \([a-z|][a-z|-]*\))$/\1/p' \
+    | tr '|' '\n' | grep -v '^-' | sort -u)
+assert_eq "main() dispatches at least fifteen command words" "true" \
+    "$([ "$(printf '%s\n' "$MAIN_WORDS" | wc -l | tr -d ' ')" -ge 15 ] && echo true || echo false)"
+for c in $MAIN_WORDS; do
+    assert_eq "bash completion knows '$c'" "true" \
+        "$(printf '%s' "$out" | grep -qw -- "$c" && echo true || echo false)"
+    assert_eq "cmd_help documents '$c'" "true" \
+        "$("$CCS" help | grep -qw -- "$c" && echo true || echo false)"
 done
 # shellcheck disable=SC2016  # a literal needle
 assert_not_contains "completion never invokes ccs" '$(ccs' "$out"
@@ -1911,6 +1924,119 @@ assert_not_contains "nor a stale token" "stale-token" "$out"
 assert_not_contains "nor a stale tier model" "stale-opus" "$out"
 assert_not_contains "nor a stale context window" "999" "$out"
 rm -rf "$VAN_DIR"
+teardown
+
+# -- The parser keeps every section's values in that section --
+printf '\033[1m[regression: config parsing]\033[0m\n'
+setup
+CFG="$TEST_CONFIG_DIR/.claude-provider/config"
+cat > "$CFG" <<'CONF'
+[_defaults]
+provider=alpha
+model=alpha-model
+
+[alpha]
+base_url=https://alpha.example
+api_key=ALPHA_KEY
+model=alpha-model
+opus_model=alpha-opus
+
+[beta]  ; my primary
+base_url=https://beta.example
+api_key=BETA_KEY
+model=beta-model
+
+[alpha_api]
+base_url=https://other.example
+key=NOT_THE_ALPHA_KEY
+model=other
+
+[alpha_opus]
+base_url=https://other.example
+api_key=x
+model=NOT_THE_ALPHA_OPUS
+CONF
+chmod 600 "$CFG"
+"$CCS" use alpha >/dev/null 2>&1
+# A trailing comment after a header used to drop the header into no arm at all,
+# silently attributing every key below it to the previous section.
+assert_eq "a header with a trailing comment still opens its section" "BETA_KEY" \
+    "$("$CCS" config get beta api_key)"
+assert_eq "so the previous section keeps its own key" "ALPHA_KEY" \
+    "$("$CCS" config get alpha api_key)"
+assert_contains "and the commented section is a provider" "beta" "$("$CCS" list)"
+# cfg_<section>_<key> is an ambiguous join without escaping.
+assert_eq "[alpha_api] key does not overwrite [alpha] api_key" "NOT_THE_ALPHA_KEY" \
+    "$("$CCS" config get alpha_api key)"
+assert_eq "[alpha_opus] model does not overwrite [alpha] opus_model" "alpha-opus" \
+    "$("$CCS" config get alpha opus_model)"
+out=$("$CCS" env)
+assert_contains "so the launch exports the right tier" "ANTHROPIC_DEFAULT_OPUS_MODEL='alpha-opus'" "$out"
+assert_contains "and the right token" "ALPHA_KEY" "$out"
+teardown
+
+# -- A section repeated in the file is one provider --
+printf '\033[1m[regression: repeated sections]\033[0m\n'
+setup
+printf '\n[zzdup]\napi_key=k\nmodel=m\n\n[zzdup]\nmodel=m2\n' >> "$TEST_CONFIG_DIR/.claude-provider/config"
+assert_eq "listed once, not once per occurrence" "1" \
+    "$("$CCS" list | grep -c ' zzdup ' | tr -d ' ')"
+teardown
+
+# -- An existing [claude] provider is not duplicated on upgrade --
+printf '\033[1m[regression: native section append]\033[0m\n'
+setup
+cat > "$TEST_CONFIG_DIR/.claude-provider/config" <<'CONF'
+[_defaults]
+provider=claude
+model=proxied
+
+[claude]
+base_url=https://corp-proxy.example/anthropic
+api_key=CORP_KEY
+model=proxied
+CONF
+chmod 600 "$TEST_CONFIG_DIR/.claude-provider/config"
+"$CCS" list >/dev/null 2>&1
+assert_eq "no second [claude] section is appended" "1" \
+    "$(grep -c '^\[claude\]' "$TEST_CONFIG_DIR/.claude-provider/config" | tr -d ' ')"
+assert_contains "and the configured proxy survives" "https://corp-proxy.example/anthropic" \
+    "$("$CCS" config get claude base_url)"
+teardown
+
+# -- status explains a truncated state file instead of exiting silently --
+printf '\033[1m[regression: truncated active file]\033[0m\n'
+setup
+set_key anthropic api_key sk-ant-test
+"$CCS" use anthropic >/dev/null 2>&1
+# A write cut short leaves a file that exists but names no provider. With a
+# usable [_defaults] the fallback covers it, which is correct; the silent exit
+# happened when nothing could stand in for it.
+: > "$TEST_CONFIG_DIR/.claude-provider/active"
+out=$("$CCS" status 2>&1 || true)
+assert_contains "a usable default still answers" "anthropic" "$out"
+set_key _defaults provider ""
+: > "$TEST_CONFIG_DIR/.claude-provider/active"
+out=$("$CCS" status 2>&1 || true)
+assert_contains "otherwise status says what is wrong" "No usable active provider" "$out"
+assert_exit "and still fails" "1" "$CCS" status
+teardown
+
+# -- config set refuses a value it cannot store on one line --
+printf '\033[1m[regression: multi-line config value]\033[0m\n'
+setup
+out=$("$CCS" config set zai api_key "$(printf 'line1\nline2')" 2>&1 || true)
+assert_contains "a wrapped paste is refused, not truncated" "cannot contain a newline" "$out"
+assert_eq "and nothing was written" "" "$("$CCS" config get zai api_key)"
+teardown
+
+# -- A pinned window with a leading zero is not read as octal --
+printf '\033[1m[regression: leading-zero token counts]\033[0m\n'
+setup
+set_key anthropic api_key sk-ant-test
+set_key anthropic context_tokens 0100000
+"$CCS" use anthropic >/dev/null 2>&1
+assert_contains "0100000 reads as 100K, not 32K" "100K" "$("$CCS" status)"
 teardown
 
 # -- Summary --

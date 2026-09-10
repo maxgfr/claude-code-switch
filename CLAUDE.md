@@ -24,7 +24,11 @@ thing. It now checks validity first and says what the user has to clean up by ha
 
 - **Single script**: `ccs` (~2500 lines of POSIX sh)
 - **Config**: INI format at `~/.claude-provider/config`, parsed with shell builtins (`while read` +
-  `case` + parameter expansions). **No `sed`/`cut` in `parse_config`**: it runs on every launch and a
+  `case` + parameter expansions). The header arm matches on the opening bracket, not on the line
+  ending in one: `[zai]  # main` used to match no arm at all and be dropped silently, leaving every
+  key beneath it attributed to the previous section — a credential written into another vendor's
+  provider, with `ccs status` reporting nothing wrong. Anything after `]` is a trailing comment, a
+  header with no closing bracket warns, and a section repeated in the file is one provider. **No `sed`/`cut` in `parse_config`**: it runs on every launch and a
   fork per line cost ~400 ms on a 100-line config. Spaces around `=` are trimmed, same rule as
   `config_set`. `write_defaults` is one `awk` pass for the same reason
 - **State**: `~/.claude-provider/active` stores the current provider and model, plus `NATIVE=` for
@@ -79,6 +83,18 @@ thing. It now checks validity first and says what the user has to clean up by ha
 - POSIX sh compatible (no bash-isms: no `[[ ]]`, no arrays, no `${var//pattern}`)
 - `local` keyword used despite not being strictly POSIX (supported everywhere in practice)
 - `env -u` used in `cmd_launch` to scrub conflicting inherited vars (same spirit as `local`: not strictly POSIX, supported by GNU/BSD/macOS/busybox). Native launch unsets third-party vars and vice versa; `cmd_env` native branch unsets the tier vars a third-party eval may have exported
+- `config_set` refuses a value containing a newline: one line per key is the file format, and a
+  wrapped paste used to be cut at the first newline with the remainder left in the section as a
+  stray line — live config if it contained an `=`
+- `require_config` checks the section name as well as the `native=` key before appending `[claude]`.
+  A config that already had a provider called `claude` (a corporate proxy, a reseller) otherwise
+  gained a second one on the first command after upgrading, whose `native=true` won at parse time
+  and silently discarded the configured endpoint
+- `cmd_status` reports a state file that names no provider instead of exiting non-zero with no
+  output: `read_active` accepts a file cut short by a full disk or a Ctrl-C, and `load_state` then
+  returns non-zero into a bare call that `set -e` turned into a silent death
+- `fmt_tokens` strips leading zeros before any arithmetic — `$(( 0100000 ))` is octal, so a pinned
+  `context_tokens=0100000` displayed as 32K
 - **`$CCS_SCRUB` is that list, written once.** Both the native launch and `launch_vanilla` claim to
   run claude as claude, so both scrub. `launch_vanilla` used not to, which meant a leftover
   `eval "$(ccs env)"` for another provider silently won: ccs announced "launching vanilla claude"
@@ -90,7 +106,13 @@ thing. It now checks validity first and says what the user has to clean up by ha
   `cmd_env` and `cmd_models` all go through it (return 1 = no default provider, 2 = no api key)
 - The two token-limit vars are appended to `exec env` as unquoted words that expand to nothing when
   unknown — safe only because `is_uint` guarantees they are digits-only (`# shellcheck disable=SC2086`)
-- Config values stored in `cfg_<section>_<key>` shell variables, retrieved via `get_cfg()`;
+- Config values stored in `cfg_<section>_<key>` shell variables, built by `cfg_var()`, retrieved via
+  `get_cfg()`. **The join is escaped, because it is otherwise ambiguous**: section names and keys
+  share the alphabet `[A-Za-z0-9_]`, so `[zai_api] key=` and `[zai] api_key=` both landed in
+  `cfg_zai_api_key` and one silently overwrote the other. Every `_` inside a name is doubled, which
+  makes the single `_` between them the only odd-length run of underscores at the boundary.
+  Hyphens are rejected in section names precisely because shell variable names have no spare
+  character, so escaping is the only way out;
   `config_set()` writes one back (awk, creates the section when missing). **Values reach awk
   through `ENVIRON`, never `-v`**: a `-v` assignment gets escape processing, so a value containing
   `\n` was written as a real newline and split the `key=value` line in two, leaving a malformed
@@ -128,6 +150,12 @@ test.sh             # Integration test suite (run in CI, hermetic: stubs llm-mod
 ## Commands
 
 `ccs use|list|status|config|launch|with|env|models|notify|caffeine|relaunch|sync|doctor|reset|purge|help|version|completion`
+
+Four short aliases are dispatched too — `ls`, `st`, `cfg`, `run` — and they are part of
+`$CCS_COMMANDS`, both completion heredocs and `cmd_help()`. They existed undocumented in all
+three for a long time because the test that was supposed to catch exactly that retyped the
+command list out of the source instead of deriving it from `main()`; it now reads `main()`'s
+own case labels, so an addition that is not documented fails the suite.
 
 `ccs completion bash|zsh` prints a **static** script (heredocs in `completion_bash` /
 `completion_zsh`). Commands and subcommands are spelled out from `$CCS_COMMANDS`; provider names
@@ -305,6 +333,12 @@ config.
   is the **only** function that writes into `~/.claude`, and `sync_backup_claude` always runs first
 - `sync_stage` returns 1 (not `die`) when `~/.claude` has nothing to back up, so `sync status`
   works on a fresh machine
+- **The budget must not cost files.** `sync_apply` removes an allow-listed path before extracting
+  it, so a watchdog `TERM` landing in that window deletes part of `~/.claude` and nothing puts it
+  back — on an ordinary launch, reported only as "config sync timed out". `sync_auto_once` touches
+  `$SYNC_CRITICAL_FILE` for the duration of the rewrite and `sync_run_bounded` waits rather than
+  kills while it exists, up to a ceiling twelve times the budget. A marker left by a run that was
+  killed anyway is cleared at the start of the next one
 - `sync auto on` runs inside `sync_run_bounded` (background job + `kill -0` watchdog — macOS has no
   `timeout(1)`) and **must never be fatal**: `cmd_launch` calls it before anything provider-related
   and ignores every failure. The watchdog ticks every 0.1 s (`sleep 0.1` is not POSIX but GNU,

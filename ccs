@@ -30,6 +30,8 @@ CCS_OSRELEASE="${CCS_OSRELEASE:-/proc/sys/kernel/osrelease}"
 RELAUNCH_OVERRIDE=""                          # --relaunch / --no-relaunch, beats the config
 RELAUNCH_STATUS=0                             # exit status of the last captured claude run
 RELAUNCH_LOG=""                               # where that run's output was recorded
+RELAUNCH_STATUS_FILE=""                       # where claude's exit status comes back
+RELAUNCH_TRAPPED=0                            # 1 once the cleanup trap is armed
 # "Now" for the reset-time maths. Overridable only so the test suite can wait
 # two seconds instead of until 1:10am — there is no reason to set it.
 CCS_RELAUNCH_NOW="${CCS_RELAUNCH_NOW:-}"
@@ -49,8 +51,12 @@ RELAUNCH_STALE_AFTER=21600                    # 6 hours
 SYNC_DIR="${CONFIG_DIR}/sync"                 # git working copy mirroring the remote
 SYNC_BACKUP_DIR="${CONFIG_DIR}/sync-backup"   # ~/.claude snapshots, one per apply
 SYNC_STATE_FILE="${CONFIG_DIR}/sync-state"
+# Exists only while an automatic sync is rewriting ~/.claude. The watchdog
+# refuses to kill the run while it does.
+SYNC_CRITICAL_FILE="${CONFIG_DIR}/sync-critical"
 SYNC_MANIFEST=".ccs-sync"
 SYNC_HOME_TOKEN="__CCS_HOME__"                # stands in for $HOME in the remote
+SYNC_ESC_TOKEN="__CCS_ESC__"                  # escapes a literal SYNC_HOME_TOKEN in content
 SYNC_TIMEOUT=5                                # seconds the auto sync may steal from a launch
 
 # The allow-list of everything ccs backs up, relative to ~/.claude. It is
@@ -143,10 +149,23 @@ parse_config() {
             # Empty lines and comments
             ""|\#*) continue ;;
 
-            # Section header
-            \[*\])
+            # Section header. The arm matches on the opening bracket alone, not
+            # on the line ending in one: `[zai]  # main` is legal in most INI
+            # dialects, and matching `\[*\]` dropped it into no arm at all —
+            # silently, with no warning, leaving every key beneath it attributed
+            # to the previous section. That is a credential written into another
+            # vendor's provider, reported by `ccs status` as if nothing happened.
+            \[*)
                 current_section=${line#\[}
-                current_section=${current_section%\]}
+                # Everything from the closing bracket on is a trailing comment.
+                case "$current_section" in
+                    *\]*) current_section=${current_section%%\]*} ;;
+                    *)
+                        warn "Skipping section header with no closing bracket: $line"
+                        current_section=""
+                        continue
+                        ;;
+                esac
                 # Validate section name
                 case "$current_section" in
                     ""|*[!a-zA-Z0-9_]*)
@@ -158,8 +177,13 @@ parse_config() {
                     # provider, so it stays out of `ccs list` and `ccs use`.
                     _*) ;;
                     *)
-                        # Add to providers list
-                        PROVIDERS="${PROVIDERS:+$PROVIDERS }$current_section"
+                        # Once each: a section repeated in the file is one
+                        # provider whose keys merge last-wins, not two entries
+                        # in `ccs list`.
+                        case " $PROVIDERS " in
+                            *" $current_section "*) ;;
+                            *) PROVIDERS="${PROVIDERS:+$PROVIDERS }$current_section" ;;
+                        esac
                         ;;
                 esac
                 ;;
@@ -176,16 +200,46 @@ parse_config() {
                 case "$key" in
                     ""|*[!a-zA-Z0-9_]*) continue ;;
                 esac
-                eval "cfg_${current_section}_${key}=\"\$value\""
+                eval "$(cfg_var "$current_section" "$key")=\"\$value\""
                 ;;
         esac
     done < "$CONFIG_FILE"
 }
 
+# The shell variable holding one config value.
+#
+# `cfg_ + section + _ + key` is not injective: section names and keys share the
+# alphabet [A-Za-z0-9_], so [zai_api] key= and [zai] api_key= both landed in
+# cfg_zai_api_key — one silently overwriting the other, which put another
+# provider's credential behind `ccs status`'s report of this one. Hyphens are
+# rejected in section names precisely because shell variable names have no
+# character to spare, so the separator has to come from escaping instead:
+# every `_` inside a name is doubled, and the single `_` between them is then
+# the only odd-length run of underscores at the boundary.
+#
+#   [zai_api] key       -> cfg_zai__api_key
+#   [zai]     api_key   -> cfg_zai_api__key
+cfg_var() {
+    local section="$1" key="$2" a="" b="" rest c
+    rest="$section"
+    while [ -n "$rest" ]; do
+        c=${rest%"${rest#?}"}
+        rest=${rest#?}
+        case "$c" in _) a="${a}__" ;; *) a="${a}${c}" ;; esac
+    done
+    rest="$key"
+    while [ -n "$rest" ]; do
+        c=${rest%"${rest#?}"}
+        rest=${rest#?}
+        case "$c" in _) b="${b}__" ;; *) b="${b}${c}" ;; esac
+    done
+    printf 'cfg_%s_%s' "$a" "$b"
+}
+
 # Get a config value
 get_cfg() {
     local section="$1" key="$2"
-    eval printf '%s' "\"\${cfg_${section}_${key}:-}\""
+    eval printf '%s' "\"\${$(cfg_var "$section" "$key"):-}\""
 }
 
 # --- State file ---
@@ -332,7 +386,14 @@ TMPL
     # config that already declares a native provider is left alone — and so the
     # append happens exactly once. The existing [_defaults] is never touched:
     # an install in place keeps whatever provider it was on.
-    if [ -f "$CONFIG_FILE" ] && ! grep -qE '^[[:space:]]*native[[:space:]]*=' "$CONFIG_FILE"; then
+    # The section name is checked as well as the key: a config that already has
+    # a provider called [claude] — a corporate proxy, a reseller — would
+    # otherwise gain a second [claude] on the first command after upgrading,
+    # whose native=true wins at parse time and silently discards the endpoint,
+    # key and model the user had configured.
+    if [ -f "$CONFIG_FILE" ] &&
+        ! grep -qE '^[[:space:]]*native[[:space:]]*=' "$CONFIG_FILE" &&
+        ! grep -qE '^[[:space:]]*\[claude\]' "$CONFIG_FILE"; then
         printf '\n# Native login — exactly what running claude on its own does.\n[claude]\nnative=true\n' \
             >> "$CONFIG_FILE"
     fi
@@ -442,6 +503,14 @@ have_llm_models() {
 # Render a token count for humans: 1000000 -> 1.0M, 204800 -> 204K
 fmt_tokens() {
     local n="${1:-}"
+    # Strip leading zeros before any arithmetic: $(( 0100000 )) is octal, so a
+    # config pinning context_tokens=0100000 was displayed as 32K.
+    while :; do
+        case "$n" in
+            0[0-9]*) n=${n#0} ;;
+            *) break ;;
+        esac
+    done
     if ! is_uint "$n"; then
         printf '%s' "-"
     elif [ "$n" -ge 1000000 ]; then
@@ -724,12 +793,19 @@ cmd_list() {
 }
 
 cmd_status() {
+    local rc=0
     if ! read_active; then
         die "No active provider. Run 'ccs use <provider>' first."
     fi
     # Re-resolve from the config so the key and endpoint shown are the ones a
-    # launch would use right now
-    load_state
+    # launch would use right now. read_active accepts a file that exists but
+    # carries no PROVIDER= line — a write cut short by a full disk or a Ctrl-C —
+    # and load_state then returns non-zero, which under set -e ended the command
+    # with no output at all and a bare exit code.
+    load_state || rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "$ACTIVE_PROVIDER" ]; then
+        die "No usable active provider — $(tilde "$ACTIVE_FILE") names none. Run 'ccs use <provider>'."
+    fi
 
     printf "\n"
     printf '  %sProvider:%s  %s\n' "${C_BOLD}" "${C_RESET}" "$ACTIVE_PROVIDER"
@@ -1220,6 +1296,8 @@ relaunch_wait() {
 relaunch_capture() {
     local st q w
     st=$(mktemp)
+    RELAUNCH_STATUS_FILE="$st"
+    relaunch_arm_trap
     CCS_RELAUNCH_STATUS="$st"
     export CCS_RELAUNCH_STATUS
     if [ -t 1 ]; then
@@ -1246,7 +1324,27 @@ relaunch_capture() {
     RELAUNCH_STATUS=$(cat "$st" 2>/dev/null)
     is_uint "$RELAUNCH_STATUS" || RELAUNCH_STATUS=1
     rm -f "$st"
+    RELAUNCH_STATUS_FILE=""
     unset CCS_RELAUNCH_STATUS
+}
+
+# Ctrl-C during a recorded session, or during the wait that follows it, used to
+# leave both temp files behind — and the recording holds the whole session, so
+# one accumulates per interrupted run. The help text promises the opposite.
+# `$RELAUNCH_LOG` and `$RELAUNCH_STATUS_FILE` are the only two, and the trap is
+# armed for as long as either exists.
+relaunch_cleanup() {
+    [ -z "$RELAUNCH_LOG" ] || rm -f "$RELAUNCH_LOG"
+    [ -z "$RELAUNCH_STATUS_FILE" ] || rm -f "$RELAUNCH_STATUS_FILE"
+    RELAUNCH_LOG="" RELAUNCH_STATUS_FILE=""
+}
+
+relaunch_arm_trap() {
+    [ "$RELAUNCH_TRAPPED" -eq 0 ] || return 0
+    RELAUNCH_TRAPPED=1
+    trap 'relaunch_cleanup; exit 130' INT
+    trap 'relaunch_cleanup; exit 143' TERM
+    trap 'relaunch_cleanup' EXIT
 }
 
 # The loop: run, look for the limit message, wait, add --continue, run again.
@@ -1260,6 +1358,7 @@ relaunch_loop() {
     fi
     while :; do
         RELAUNCH_LOG=$(mktemp)
+        relaunch_arm_trap
         relaunch_capture "$@"
         rc=0
         reset=$(relaunch_detect "$RELAUNCH_LOG") || rc=$?
@@ -1579,18 +1678,20 @@ ${C_BOLD}LAUNCH FLAGS${C_RESET}
 
 ${C_BOLD}COMMANDS${C_RESET}
     use <provider> [model]      Switch to a provider (saves as default)
-    list                        List configured providers
-    status                      Show active provider and model
-    config                      Open config file in \$EDITOR
+    list  (ls)                  List configured providers
+    status  (st)                Show active provider and model
+    config  (cfg)               Open config file in \$EDITOR
     config get <section> <key>  Print one config value (empty if unset)
     config set <section> <key> [value]
                                 Set one value; no value = read it from stdin,
                                 hidden when that is a terminal
-    launch [args...]            Launch claude with active provider env vars
+    launch  (run) [args...]     Launch claude with active provider env vars
     with <provider>[/<model>]   Launch once with another provider (see USAGE)
     env                         Print export statements for current shell
     models [refresh|clear]      Show / refresh the context windows ccs will use
-    notify on|off|status|test   Desktop notifications when Claude needs you
+    notify on [terminal]        Desktop notifications when Claude needs you
+    notify off|status|test      terminal: auto (default), ghostty, iterm2,
+                                wezterm, kitty, macos, bell
     caffeine on|off|status      Keep the machine awake while claude runs
     relaunch on|off|status      Wait out the usage limit, then claude --continue
     sync <subcommand>           Back up ~/.claude to a gist or repo (see below)
@@ -1606,9 +1707,13 @@ ${C_BOLD}SYNC SUBCOMMANDS${C_RESET}
     sync init --repo-new <name> Create a private repo and use it (needs gh)
     sync init --gist <id|url>   Use a gist you already have
     sync init --repo <url>      Use a repo you already have
-    sync push [--force]         Back up ~/.claude to the remote
-    sync pull [--additive]      Restore ~/.claude from the remote
-    sync import <id|url>        Import someone else's config (asks first)
+    sync push [--force] [--dry-run]
+                                Back up ~/.claude to the remote
+    sync pull [--additive] [--dry-run]
+                                Restore ~/.claude from the remote
+    sync import <id|owner/repo|url> [--adopt] [--with-ccs] [--additive] [--yes]
+                                Import someone else's config (asks first;
+                                --yes is required when stdin is not a terminal)
     sync status                 Remote, scope, last sync, what would push
     sync auto on|off            Sync on every 'ccs' launch (default: off)
     sync hooks on|off           Sync on Claude Code session start/end
@@ -2343,6 +2448,17 @@ sync_require_remote() {
 # alphabet, so those stay as `-v`.
 config_set() {
     local section="$1" key="$2" value="$3" tmp
+    # One line per key is the file format. A pasted value that wraps used to be
+    # written across several physical lines: the credential was cut at the first
+    # newline, `ccs config get` returned the stump, and the remainder sat in the
+    # section as a stray line — live config if it happened to contain an `=`.
+    # A literal newline in the pattern: $(printf '\n') is stripped to the empty
+    # string by command substitution, and an empty pattern matches everything.
+    case "$value" in
+        *"
+"*)
+            die "A value cannot contain a newline — $key was not changed." ;;
+    esac
     require_config
     tmp=$(mktemp)
     CCS_SET_VALUE="$value" awk -v sec="$section" -v k="$key" '
@@ -2362,7 +2478,7 @@ config_set() {
     mv "$tmp" "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
     # Keep the already-parsed view consistent for the rest of this run
-    eval "cfg_${section}_${key}=\"\$value\""
+    eval "$(cfg_var "$section" "$key")=\"\$value\""
 }
 
 # Accept a gist id, an owner/repo shorthand, a full URL or a local path
@@ -2444,19 +2560,48 @@ sync_wipe_worktree() {
 # Swap $HOME for a placeholder (and back) across a staged tree, so hook commands
 # and any absolute path survive a move to a machine with a different $HOME.
 # Only ever runs on a staging tree — never walks ~/.claude itself.
+# $HOME <-> __CCS_HOME__, as a transform that is actually reversible.
+#
+# Replacing every __CCS_HOME__ with $HOME on the way in corrupts any file that
+# legitimately contains that token — documentation about ccs sync, a CLAUDE.md
+# describing the mechanism — and nothing can tell the two apart afterwards, so
+# the damage is permanent. The fix is the ordinary escaping discipline: hide
+# the literal occurrences before introducing the real ones, and unhide them
+# after removing the real ones, in exactly the reverse order.
+#
+#   out:  __CCS_ESC__ -> __CCS_ESC__E     (escape the escape marker itself)
+#         __CCS_HOME__ -> __CCS_ESC__H    (escape a literal home token)
+#         $HOME -> __CCS_HOME__
+#   in:   __CCS_HOME__ -> $HOME
+#         __CCS_ESC__H -> __CCS_HOME__
+#         __CCS_ESC__E -> __CCS_ESC__
+#
+# sed applies -e expressions in order and does not re-run an earlier one on a
+# later one's output, which is exactly the semantics this needs. Remotes
+# written before this still read correctly: they carry no __CCS_ESC__, so the
+# two unescape steps are no-ops.
 sync_rewrite_home() {
-    local root="$1" from="$2" to="$3" pat rep f tmp
+    local root="$1" dir="$2" home pat rep f tmp
     [ -d "$root" ] || return 0
-    pat=$(sed_escape_pattern "$from")
-    rep=$(sed_escape_replacement "$to")
+    home=$(printf '%s' "$HOME")
+    pat=$(sed_escape_pattern "$home")
+    rep=$(sed_escape_replacement "$home")
     find "$root" -type f -not -path '*/.git/*' -print | while IFS= read -r f; do
-        if grep -FIq -- "$from" "$f" 2>/dev/null; then
-            tmp="${f}.ccs-rewrite"
-            if sed "s|${pat}|${rep}|g" "$f" > "$tmp" 2>/dev/null; then
-                cat "$tmp" > "$f"      # preserves the mode, unlike mv
-            fi
-            rm -f "$tmp"
+        if ! grep -FIq -e "$home" -e "$SYNC_HOME_TOKEN" -e "$SYNC_ESC_TOKEN" "$f" 2>/dev/null; then
+            continue
         fi
+        tmp="${f}.ccs-rewrite"
+        if [ "$dir" = "hide" ]; then
+            sed -e "s|${SYNC_ESC_TOKEN}|${SYNC_ESC_TOKEN}E|g" \
+                -e "s|${SYNC_HOME_TOKEN}|${SYNC_ESC_TOKEN}H|g" \
+                -e "s|${pat}|${SYNC_HOME_TOKEN}|g" "$f" > "$tmp" 2>/dev/null || { rm -f "$tmp"; continue; }
+        else
+            sed -e "s|${SYNC_HOME_TOKEN}|${rep}|g" \
+                -e "s|${SYNC_ESC_TOKEN}H|${SYNC_HOME_TOKEN}|g" \
+                -e "s|${SYNC_ESC_TOKEN}E|${SYNC_ESC_TOKEN}|g" "$f" > "$tmp" 2>/dev/null || { rm -f "$tmp"; continue; }
+        fi
+        cat "$tmp" > "$f"      # preserves the mode, unlike mv
+        rm -f "$tmp"
     done
     return 0
 }
@@ -2631,7 +2776,7 @@ sync_stage() {
             > "${SYNC_DIR}/ccs/config"
     fi
     sync_write_manifest
-    sync_rewrite_home "$SYNC_DIR" "$HOME" "$SYNC_HOME_TOKEN"
+    sync_rewrite_home "$SYNC_DIR" hide
     if [ "$SYNC_KIND" = "gist" ]; then
         sync_flatten_tree "$SYNC_DIR"
     fi
@@ -2992,7 +3137,7 @@ cmd_sync_pull() {
         rm -rf "$tree"
         die "the remote holds no ccs backup yet — run 'ccs sync push' first"
     fi
-    sync_rewrite_home "$tree" "$SYNC_HOME_TOKEN" "$HOME"
+    sync_rewrite_home "$tree" show
 
     if [ -n "$additive" ] || [ "$SYNC_PRUNE" = "false" ]; then
         prune="false"
@@ -3055,7 +3200,7 @@ cmd_sync_import() {
         rm -rf "$tmp"
         die "$remote does not look like a ccs config backup"
     fi
-    sync_rewrite_home "$tree" "$SYNC_HOME_TOKEN" "$HOME"
+    sync_rewrite_home "$tree" show
 
     if [ -n "$additive" ]; then
         prune="false"
@@ -3244,6 +3389,9 @@ cmd_sync_off() {
 # One full sync, used by the auto paths. Return 3 = skipped on a secret.
 sync_auto_once() {
     local before after prune="true" tree
+    # A marker left by a run that was killed anyway must not make the next
+    # watchdog wait on nothing.
+    rm -f "$SYNC_CRITICAL_FILE" 2>/dev/null || true
     sync_ensure_worktree
     sync_git reset --hard --quiet HEAD >/dev/null 2>&1 || true
     sync_git clean -fdq >/dev/null 2>&1 || true
@@ -3264,10 +3412,17 @@ sync_auto_once() {
         fi
         tree=$(mktemp -d)
         sync_materialize "$SYNC_DIR" "$tree" "$SYNC_KIND"
-        sync_rewrite_home "$tree" "$SYNC_HOME_TOKEN" "$HOME"
+        sync_rewrite_home "$tree" show
+        # From here until the hooks are back, ~/.claude is being rewritten:
+        # sync_apply removes an allow-listed path before extracting it, so a
+        # watchdog TERM landing in that window deletes part of the user's
+        # config and nothing puts it back. The marker tells the watchdog to
+        # wait rather than kill.
+        : > "$SYNC_CRITICAL_FILE" 2>/dev/null || true
         sync_backup_claude
         sync_apply "$tree" "$prune"
         sync_reattach_ccs_hooks
+        rm -f "$SYNC_CRITICAL_FILE" 2>/dev/null || true
         rm -rf "$tree"
     fi
     sync_write_state
@@ -3280,20 +3435,30 @@ sync_auto_once() {
 # sleep is not POSIX, but GNU, BSD/macOS and busybox all accept it; where it
 # is refused the loop falls back to whole seconds.
 sync_run_bounded() {
-    local secs="$1" pid ticks=0 max rc=0 step="0.1"
+    local secs="$1" pid ticks=0 max hardmax rc=0 step="0.1"
     shift
     max=$((secs * 10))
+    # The budget exists so a slow network cannot delay a launch. It must not
+    # cost the user files: once the run has started rewriting ~/.claude, the
+    # only safe thing is to let it finish, up to a much larger ceiling.
+    hardmax=$((max * 12))
     ( "$@" ) >/dev/null 2>&1 &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         ticks=$((ticks + 1))
         if [ "$ticks" -gt "$max" ]; then
-            kill -TERM "$pid" 2>/dev/null || true
-            return 124
+            if [ -f "$SYNC_CRITICAL_FILE" ] && [ "$ticks" -le "$hardmax" ]; then
+                : # mid-restore: waiting is the lesser evil
+            else
+                kill -TERM "$pid" 2>/dev/null || true
+                rm -f "$SYNC_CRITICAL_FILE" 2>/dev/null || true
+                return 124
+            fi
         fi
         if ! sleep "$step" 2>/dev/null; then
             step=1
             max="$secs"
+            hardmax=$((max * 12))
             ticks=$((ticks / 10))
             sleep 1
         fi
@@ -3355,7 +3520,9 @@ cmd_version() {
 # offered only where a section is expected (config get/set), never as
 # providers. Both scripts skip leading launch flags before looking at the
 # command word, so `ccs --caffeine with <TAB>` works.
-CCS_COMMANDS="use list status config launch with env models notify caffeine relaunch sync doctor reset purge help version completion"
+# Every word main() dispatches on, aliases included — a test derives this list
+# from main()'s own case labels and fails when the two drift apart.
+CCS_COMMANDS="use list ls status st config cfg launch run with env models notify caffeine relaunch sync doctor reset purge help version completion"
 CCS_LAUNCH_FLAGS="--caffeine --caffeine=display --no-caffeine --relaunch --no-relaunch"
 CCS_SECTION_SED='s/^[[:space:]]*\[\([A-Za-z0-9][A-Za-z0-9_]*\)\][[:space:]]*$/\1/p'
 
