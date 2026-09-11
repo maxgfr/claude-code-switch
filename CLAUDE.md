@@ -251,6 +251,12 @@ config.
   Anthropic) call `launch_run <cmd…>` instead; off means `exec "$@"`, byte-for-byte the old
   behaviour. On, `relaunch_loop` runs the command as a child, and only returns (to the `exec`) when
   a tty is needed and `script(1)` is missing
+- **Recordings live in `~/.claude-provider/tmp/`, named `<what>.<pid>`, and every launch sweeps the
+  ones whose pid is gone.** A trap cannot be the guarantee: it does not run on `SIGKILL`, and it
+  does not run while the shell is still waiting on the recorded pipeline — which is exactly when a
+  session gets interrupted. Verified: two files survive a `kill -9` and the next launch removes
+  them. A pid that answers "operation not permitted" belongs to another user and is left alone.
+  The traps stay as a second line, but the sweep is the one with a test
 - **Recording**: on a terminal, `script(1)` gives the TUI a real pty — positional form on
   Darwin/BSD, `-c "<string>"` on util-linux/busybox with `SHELL=/bin/sh` pinned and every word
   through `sh_quote`. On a pipe, stdout and stderr each go through their own `tee` (fd 3/4
@@ -348,7 +354,10 @@ config.
   `[_sync]` section stripped. On the way back, `sync_merge_ccs_config` writes an `api_key` only when
   the local one is empty — a pull must never cost a key
 - `test.sh` runs the whole sync suite against a `git init --bare` repo over `file://`: no network,
-  no `gh`. ccs writes its own git identity into the working copy (`sync_git_identity`), which is
+  no real `gh` — the two `gh`-backed inits are covered by a stub that returns a local bare repo, so
+  the flags ccs passes (`--private`, and never `--public`) are asserted along with the
+  gh-absent and gh-failing branches. Both `--dry-run` previews and the diverged/unreachable remote
+  paths are covered the same way. ccs writes its own git identity into the working copy (`sync_git_identity`), which is
   what makes it pass on a CI runner with no global git config
 
 ## Doctor (`ccs doctor`)

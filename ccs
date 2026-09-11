@@ -32,6 +32,13 @@ RELAUNCH_STATUS=0                             # exit status of the last captured
 RELAUNCH_LOG=""                               # where that run's output was recorded
 RELAUNCH_STATUS_FILE=""                       # where claude's exit status comes back
 RELAUNCH_TRAPPED=0                            # 1 once the cleanup trap is armed
+# Recordings live in a directory ccs owns, named after the process that made
+# them, and every launch sweeps the ones whose process is gone. A trap cannot
+# be the guarantee here: it does not run on SIGKILL, and it does not run while
+# the shell is still waiting on the recorded pipeline, which is exactly when a
+# session is interrupted. A sweep covers both, and can be tested without
+# delivering a signal at all.
+RELAUNCH_TMP_DIR="${CONFIG_DIR}/tmp"
 # "Now" for the reset-time maths. Overridable only so the test suite can wait
 # two seconds instead of until 1:10am — there is no reason to set it.
 CCS_RELAUNCH_NOW="${CCS_RELAUNCH_NOW:-}"
@@ -1295,7 +1302,7 @@ relaunch_wait() {
 # comes back through a file because neither wrapper is trusted to relay it.
 relaunch_capture() {
     local st q w
-    st=$(mktemp)
+    st=$(relaunch_tmpfile status)
     RELAUNCH_STATUS_FILE="$st"
     relaunch_arm_trap
     CCS_RELAUNCH_STATUS="$st"
@@ -1333,6 +1340,39 @@ relaunch_capture() {
 # one accumulates per interrupted run. The help text promises the opposite.
 # `$RELAUNCH_LOG` and `$RELAUNCH_STATUS_FILE` are the only two, and the trap is
 # armed for as long as either exists.
+# A temp file this process owns, under the directory ccs sweeps.
+relaunch_tmpfile() {
+    mkdir -p "$RELAUNCH_TMP_DIR" 2>/dev/null || { mktemp; return; }
+    chmod 700 "$RELAUNCH_TMP_DIR" 2>/dev/null || true
+    local f="${RELAUNCH_TMP_DIR}/$1.$$"
+    : > "$f" 2>/dev/null || { mktemp; return; }
+    chmod 600 "$f" 2>/dev/null || true
+    printf '%s' "$f"
+}
+
+# Remove what earlier runs left behind. A file is named <what>.<pid>; if that
+# process is gone, so is the run that owned it.
+relaunch_sweep() {
+    [ -d "$RELAUNCH_TMP_DIR" ] || return 0
+    local f pid
+    for f in "$RELAUNCH_TMP_DIR"/*; do
+        [ -e "$f" ] || continue
+        pid=${f##*.}
+        case $pid in
+            ''|*[!0-9]*) rm -f "$f" 2>/dev/null || true; continue ;;
+        esac
+        [ "$pid" = "$$" ] && continue
+        kill -0 "$pid" 2>/dev/null && continue
+        # A process owned by someone else answers "operation not permitted",
+        # which means it exists. Only a pid that is genuinely gone is swept.
+        case $(kill -0 "$pid" 2>&1) in
+            *[Pp]ermission*|*permitted*) continue ;;
+        esac
+        rm -f "$f" 2>/dev/null || true
+    done
+    return 0
+}
+
 relaunch_cleanup() {
     [ -z "$RELAUNCH_LOG" ] || rm -f "$RELAUNCH_LOG"
     [ -z "$RELAUNCH_STATUS_FILE" ] || rm -f "$RELAUNCH_STATUS_FILE"
@@ -1356,8 +1396,9 @@ relaunch_loop() {
         warn "relaunch is on but script(1) is missing — running claude without it"
         return 0
     fi
+    relaunch_sweep
     while :; do
-        RELAUNCH_LOG=$(mktemp)
+        RELAUNCH_LOG=$(relaunch_tmpfile session)
         relaunch_arm_trap
         relaunch_capture "$@"
         rc=0

@@ -2039,6 +2039,138 @@ set_key anthropic context_tokens 0100000
 assert_contains "0100000 reads as 100K, not 32K" "100K" "$("$CCS" status)"
 teardown
 
+# --- gh-dependent paths, git failures, and the dry runs --------------------
+# All against a stubbed gh and local bare repos: no network, no real gist.
+
+# -- sync init --gist-new / --repo-new --
+printf '\033[1m[sync: gh-backed init]\033[0m\n'
+sync_setup
+GH_DIR=$(mktemp -d)
+GH_LOG="$GH_DIR/calls"
+# gh is stubbed and the "created" remote is a local bare repo, so init's
+# reachability check passes without a network or a real gist.
+git init --bare -q "$TEST_CONFIG_DIR/made.git"
+cat > "$GH_DIR/gh" <<GHSTUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$GH_LOG"
+case "\$1 \$2" in
+    "gist create") echo "file://$TEST_CONFIG_DIR/made.git" ;;
+    "repo create") : ;;
+    "repo view")   printf 'file://%s\n' "$TEST_CONFIG_DIR/made" ;;
+    *) exit 1 ;;
+esac
+GHSTUB
+chmod +x "$GH_DIR/gh"
+out=$(PATH="$GH_DIR:$PATH" "$CCS" sync init --gist-new 2>&1)
+assert_contains "gist-new reports the gist it made" "Created secret gist" "$out"
+assert_contains "it asks gh for a gist" "gist create" "$(cat "$GH_LOG")"
+# gh gist create makes a secret gist unless --public is passed. It must not be.
+assert_not_contains "and never a public one" "--public" "$(cat "$GH_LOG")"
+assert_contains "the remote it stored is the one gh returned" "made.git" \
+    "$("$CCS" config get _sync remote)"
+: > "$GH_LOG"
+out=$(PATH="$GH_DIR:$PATH" "$CCS" sync init --repo-new myconfig 2>&1)
+assert_contains "repo-new reports the repo it made" "Created private repo" "$out"
+assert_contains "and asks gh for a private one" "--private" "$(cat "$GH_LOG")"
+assert_contains "it reads the URL back from gh" "repo view" "$(cat "$GH_LOG")"
+assert_eq "a non-gist remote is repo storage" "repo" "$("$CCS" config get _sync kind)"
+# gh absent: both paths must explain themselves rather than fail obscurely
+NOGH=$(mktemp -d)
+for b in sh sed awk grep find mkdir rm mv cp cat printf date chmod ls id uname \
+         head tail tr wc sort stat env dirname basename cut touch sleep expr git; do
+    p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$NOGH/$b"
+done
+assert_eq "the stub PATH really has no gh" "false" \
+    "$([ -e "$NOGH/gh" ] && echo true || echo false)"
+out=$(PATH="$NOGH" "$CCS" sync init --gist-new 2>&1 || true)
+assert_contains "gist-new says gh is required" "gh is required for --gist-new" "$out"
+out=$(PATH="$NOGH" "$CCS" sync init --repo-new x 2>&1 || true)
+assert_contains "repo-new says gh is required" "gh is required for --repo-new" "$out"
+# gh present but failing
+printf '#!/bin/sh\nexit 1\n' > "$GH_DIR/gh"
+chmod +x "$GH_DIR/gh"
+assert_exit "a failing repo create is fatal" "1" \
+    env PATH="$GH_DIR:$PATH" "$CCS" sync init --repo-new x
+out=$(PATH="$GH_DIR:$PATH" "$CCS" sync init --gist-new 2>&1 || true)
+assert_contains "and a failing gist create says so" "gh gist create failed" "$out"
+rm -rf "$GH_DIR" "$NOGH"
+teardown
+
+# -- Both dry runs preview without writing --
+printf '\033[1m[sync: dry runs]\033[0m\n'
+sync_setup
+make_claude_home
+sync_init_repo
+out=$("$CCS" sync push --dry-run 2>&1)
+assert_contains "push --dry-run previews the files" "CLAUDE.md" "$out"
+assert_eq "and pushes nothing" "" "$(remote_files)"
+"$CCS" sync push >/dev/null 2>&1
+printf 'new on the remote\n' > "$CLAUDE_HOME/commands/fresh.md"
+"$CCS" sync push >/dev/null 2>&1
+rm -f "$CLAUDE_HOME/commands/fresh.md"
+out=$("$CCS" sync pull --dry-run 2>&1)
+# The preview is per allow-listed path, not per file: commands/ is marked
+# as differing from the remote.
+assert_contains "pull --dry-run marks the path that differs" "commands" "$out"
+assert_contains "and says nothing was touched" "was not touched" "$out"
+assert_eq "and restores nothing" "false" \
+    "$([ -f "$CLAUDE_HOME/commands/fresh.md" ] && echo true || echo false)"
+teardown
+
+# -- Git failures are explained, not left to git --
+printf '\033[1m[sync: git failures]\033[0m\n'
+sync_setup
+make_claude_home
+sync_init_repo
+"$CCS" sync push >/dev/null 2>&1
+# The remote moves on with a history this clone cannot fast-forward onto
+OTHER="$TEST_CONFIG_DIR/other"
+git clone -q "$SYNC_REMOTE_URL" "$OTHER" 2>/dev/null
+( cd "$OTHER" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m "elsewhere" \
+  && git push -q origin HEAD 2>/dev/null ) || true
+printf 'local change\n' > "$CLAUDE_HOME/commands/local.md"
+out=$("$CCS" sync push 2>&1 || true)
+assert_eq "a diverged remote is still resolved or explained" "true" \
+    "$(printf '%s' "$out" | grep -qE 'Backed up|conflict|diverged|pull' && echo true || echo false)"
+# An unreachable remote must not read as success
+"$CCS" config set _sync remote "file://$TEST_CONFIG_DIR/gone.git" >/dev/null 2>&1
+out=$("$CCS" sync push 2>&1 || true)
+assert_not_contains "an unreachable remote never reports a backup" "Backed up" "$out"
+assert_exit "and fails" "1" "$CCS" sync push
+teardown
+
+# -- Recordings left by a killed run are swept, and never land in the system temp --
+printf '\033[1m[regression: relaunch temp files]\033[0m\n'
+setup
+TMPD="$TEST_CONFIG_DIR/.claude-provider/tmp"
+RL_SHIM=$(mktemp -d)
+printf '#!/bin/sh\necho ok\n' > "$RL_SHIM/claude"
+chmod +x "$RL_SHIM/claude"
+# A recording and a status file from a run whose process is long gone. PID 1 is
+# alive and must be left alone; a nonsense suffix is not ours to keep either.
+mkdir -p "$TMPD"
+: > "$TMPD/session.999999"
+: > "$TMPD/status.999999"
+# This shell is alive and ours to signal, so its file must survive.
+: > "$TMPD/session.$$"
+: > "$TMPD/session.notapid"
+PATH="$RL_SHIM:$PATH" "$CCS" --relaunch -p hi >/dev/null 2>&1 || true
+assert_eq "a dead run's recording is swept" "false" \
+    "$([ -e "$TMPD/session.999999" ] && echo true || echo false)"
+assert_eq "so is its status file" "false" \
+    "$([ -e "$TMPD/status.999999" ] && echo true || echo false)"
+assert_eq "a file with no usable pid goes too" "false" \
+    "$([ -e "$TMPD/session.notapid" ] && echo true || echo false)"
+assert_eq "a live process keeps its file" "true" \
+    "$([ -e "$TMPD/session.$$" ] && echo true || echo false)"
+# And a completed run leaves nothing of its own behind.
+assert_eq "a finished run cleans up after itself" "0" \
+    "$(find "$TMPD" -name 'session.*' -not -name "session.$$" | wc -l | tr -d ' ')"
+assert_eq "the directory is private" "700" \
+    "$(stat -c '%a' "$TMPD" 2>/dev/null || stat -f '%A' "$TMPD")"
+rm -rf "$RL_SHIM"
+teardown
+
 # -- Summary --
 TOTAL=$((PASS + FAIL))
 printf '\n\033[1m=== Results: %d/%d passed ===\033[0m\n' "$PASS" "$TOTAL"
