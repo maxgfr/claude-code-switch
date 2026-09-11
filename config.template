@@ -5,6 +5,9 @@
 #   base_url=https://...
 #   api_key=your-api-key-here
 #   model=model-name          (main model — maps to sonnet/default tier)
+#   model=auto                (or auto:<filter> — llm-models picks the newest
+#                              flagship for opus and its fast variant for the
+#                              main model and the sonnet/haiku tiers, see below)
 #   opus_model=model-name     (optional, for /models opus tier)
 #   haiku_model=model-name    (optional, for /models haiku tier + fast tasks)
 #   context_tokens=200000     (optional, pins the context window — plain integer)
@@ -15,7 +18,15 @@
 #          like running claude, on whatever account claude is logged into
 # Special: [anthropic] does not need base_url (uses native API, with your key)
 # Special: [_defaults] section sets global defaults
-# opus_model and haiku_model fall back to model if empty
+# opus_model and haiku_model fall back to model if empty — and an explicit one
+# wins over its auto tier when model=auto
+#
+# model=auto asks `llm-models latest` for the endpoint in base_url, so a new
+# generation is picked up without editing this file. auto:<filter> keeps only
+# the catalogue ids containing <filter> (openrouter: auto:anthropic/). The
+# pick is cached 24 hours; `ccs models refresh` asks again, `ccs models` shows
+# it. Needs llm-models >= 1.4; a pinned model works without it. On [anthropic]
+# auto pins nothing — claude keeps its own defaults.
 #
 # context_tokens / max_output_tokens are looked up automatically from
 # llm-models when it is installed, so leave them empty unless a lookup gets it
@@ -58,7 +69,7 @@ native=true
 [anthropic]
 base_url=
 api_key=
-model=claude-sonnet-5
+model=auto
 
 [openrouter]
 base_url=https://openrouter.ai/api
@@ -68,32 +79,27 @@ model=anthropic/claude-sonnet-4
 [deepseek]
 base_url=https://api.deepseek.com/anthropic
 api_key=
-model=deepseek-chat
-opus_model=deepseek-reasoner
+model=auto
 
 [zai]
 base_url=https://api.z.ai/api/anthropic
 api_key=
-model=glm-5.1
-opus_model=glm-5.1
-haiku_model=glm-4.7
+model=auto
 
 [kimi]
 base_url=https://api.moonshot.ai/anthropic
 api_key=
-model=kimi-k2.5
+model=auto
 
 [qwen]
 base_url=https://dashscope-intl.aliyuncs.com/apps/anthropic
 api_key=
-model=qwen3.5-plus
-haiku_model=qwen3-coder-plus
+model=auto
 
 [minimax]
 base_url=https://api.minimax.io/anthropic
 api_key=
-model=MiniMax-M2.7
-haiku_model=MiniMax-M2.5
+model=auto
 
 [doubao]
 base_url=https://ark.cn-beijing.volces.com/api/coding

@@ -7,19 +7,58 @@ PASS=0
 FAIL=0
 TEST_CONFIG_DIR=""
 
-# ccs consults llm-models for context windows. Shadow it with a deterministic
-# stub for the whole suite so tests never touch the network: FAKE_LLM_MODELS
-# holds the "ctx out id" answer, and unset means "no match" (exit 1), which is
-# the behaviour every pre-existing test expects.
+# ccs consults llm-models for context windows and, with model=auto, for the
+# models themselves. Shadow it with a deterministic stub for the whole suite so
+# tests never touch the network: FAKE_LLM_MODELS holds the "ctx out id" answer
+# of `resolve` (unset means "no match", exit 1, which is what every
+# pre-existing test expects); FAKE_LLM_LATEST holds the "tier id ctx out" lines
+# of `latest` (empty means no answer); FAKE_LLM_OLD makes `latest` fail the way
+# llm-models < 1.4 does; FAKE_LLM_CALLS, when set, journals every invocation.
 STUB_DIR=$(mktemp -d)
 cat > "$STUB_DIR/llm-models" <<'STUB'
 #!/bin/sh
-[ "${1:-}" = "resolve" ] || exit 1
-[ -n "${FAKE_LLM_MODELS:-}" ] || exit 1
-printf '%s\n' "$FAKE_LLM_MODELS" | tr ' ' '\t'
+if [ -n "${FAKE_LLM_CALLS:-}" ]; then printf '%s\n' "$*" >> "$FAKE_LLM_CALLS"; fi
+case "${1:-}" in
+    --help)
+        # The command list ccs doctor greps; < 1.4 has no latest line
+        printf 'Commands:\n  resolve [options] <model>       Resolve a model\n'
+        [ -n "${FAKE_LLM_OLD:-}" ] || printf '  latest [options]                Pick the newest models\n' ;;
+    resolve)
+        [ -n "${FAKE_LLM_MODELS:-}" ] || exit 1
+        printf '%s\n' "$FAKE_LLM_MODELS" | tr ' ' '\t' ;;
+    latest)
+        if [ -n "${FAKE_LLM_OLD:-}" ]; then
+            echo "error: unknown command 'latest'" >&2
+            exit 1
+        fi
+        [ -n "${FAKE_LLM_LATEST:-}" ] || exit 1
+        printf '%s\n' "$FAKE_LLM_LATEST" | tr ' ' '\t' ;;
+    *) exit 1 ;;
+esac
 STUB
 chmod +x "$STUB_DIR/llm-models"
 export PATH="$STUB_DIR:$PATH"
+# latest_answer <opus> <sonnet> <haiku> [ctx] [out] -> what the stub prints
+latest_answer() {
+    printf 'opus %s %s %s\nsonnet %s %s %s\nhaiku %s %s %s' \
+        "$1" "${4:-204800}" "${5:-131072}" "$2" "${4:-204800}" "${5:-131072}" \
+        "$3" "${4:-204800}" "${5:-131072}"
+}
+# The shipped template says model=auto for zai and friends, so the whole suite
+# needs an answer: the tiers zai used to pin, so older assertions still hold.
+latest_default() {
+    FAKE_LLM_LATEST=$(latest_answer zai/glm-5.1 zai/glm-5.1 zai/glm-4.7)
+    export FAKE_LLM_LATEST
+}
+latest_default
+# How many times `latest` was asked for an endpoint since FAKE_LLM_CALLS was set
+llm_latest_calls() {
+    if [ -f "${FAKE_LLM_CALLS:-}" ]; then
+        grep -c 'latest --endpoint' "$FAKE_LLM_CALLS" || true
+    else
+        echo 0
+    fi
+}
 # A PATH with no llm-models on it, for the soft-dependency-absent tests
 BARE_PATH="/usr/bin:/bin"
 trap 'rm -rf "$STUB_DIR"' EXIT
@@ -150,14 +189,14 @@ assert_contains "use zai shows provider" "zai" "$out"
 assert_eq "active file exists" "true" "$([ -f "$TEST_CONFIG_DIR/.claude-provider/active" ] && echo true || echo false)"
 active=$(cat "$TEST_CONFIG_DIR/.claude-provider/active")
 assert_contains "active has correct provider" "PROVIDER=zai" "$active"
-assert_contains "active has correct model" "MODEL=glm-5.1" "$active"
+assert_contains "active keeps the auto spec, not the pick" "MODEL=auto" "$active"
 # The key and endpoint live in the config only: active names the provider,
 # nothing more, so a key edited later is live at the next launch.
 assert_not_contains "active carries no api key" "API_KEY" "$active"
 assert_not_contains "active carries no base_url" "BASE_URL" "$active"
 config=$(cat "$TEST_CONFIG_DIR/.claude-provider/config")
 assert_contains "use also sets default provider" "provider=zai" "$config"
-assert_contains "use also sets default model" "model=glm-5.1" "$config"
+assert_eq "use also sets default model" "auto" "$("$CCS" config get _defaults model)"
 teardown
 
 # -- Use with model override --
@@ -253,9 +292,9 @@ set_all_keys "test-key-123"
 "$CCS" use zai >/dev/null 2>&1
 config=$(cat "$TEST_CONFIG_DIR/.claude-provider/config")
 assert_contains "use sets default provider" "provider=zai" "$config"
-assert_contains "use sets default model" "model=glm-5.1" "$config"
+assert_eq "use sets default model" "auto" "$("$CCS" config get _defaults model)"
 # Switch again
-"$CCS" use deepseek >/dev/null 2>&1
+"$CCS" use deepseek deepseek-chat >/dev/null 2>&1
 config=$(cat "$TEST_CONFIG_DIR/.claude-provider/config")
 assert_contains "switching updates default provider" "provider=deepseek" "$config"
 assert_contains "switching updates default model" "model=deepseek-chat" "$config"
@@ -551,6 +590,7 @@ comp() {  # <cword> <words...> → COMPREPLY
 }
 assert_contains "commands complete after ccs" "doctor" "$(comp 1 ccs d)"
 assert_contains "providers complete after use" "mine_x" "$(comp 2 ccs use mi)"
+assert_contains "use completes auto" "auto" "$(comp 3 ccs use zai a)"
 assert_not_contains "reserved sections are not providers" "_sync" "$(comp 2 ccs use "")"
 assert_contains "providers complete after with" "zai" "$(comp 2 ccs with z)"
 assert_contains "config completes get/set" "set" "$(comp 2 ccs config s)"
@@ -857,7 +897,7 @@ teardown
 printf '\033[1m[context window: unknown model]\033[0m\n'
 setup
 set_all_keys "test-key-123"
-"$CCS" use zai >/dev/null 2>&1
+"$CCS" use zai glm-5.1 >/dev/null 2>&1
 out=$("$CCS" env)
 assert_contains "env unsets context tokens when unknown" "unset CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
 assert_not_contains "env exports no context tokens when unknown" "export CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
@@ -870,7 +910,7 @@ printf '\033[1m[context window: auto_context=false]\033[0m\n'
 setup
 set_all_keys "test-key-123"
 set_key _defaults auto_context false
-"$CCS" use zai >/dev/null 2>&1
+"$CCS" use zai glm-5.1 >/dev/null 2>&1
 out=$(FAKE_LLM_MODELS="1000000 131072 zai-coding-plan/glm-5.3" "$CCS" env)
 assert_not_contains "auto_context=false exports nothing" "export CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
 out=$(FAKE_LLM_MODELS="1000000 131072 zai-coding-plan/glm-5.3" "$CCS" status)
@@ -882,7 +922,7 @@ printf '\033[1m[context window: invalid pin]\033[0m\n'
 setup
 set_all_keys "test-key-123"
 set_key zai context_tokens "200k"
-"$CCS" use zai >/dev/null 2>&1
+"$CCS" use zai glm-5.1 >/dev/null 2>&1
 out=$("$CCS" env 2>/dev/null)
 assert_not_contains "non-numeric pin is not exported" "export CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
 err=$("$CCS" env 2>&1 >/dev/null)
@@ -893,7 +933,7 @@ teardown
 printf '\033[1m[context window: llm-models lookup + cache]\033[0m\n'
 setup
 set_all_keys "test-key-123"
-FAKE_LLM_MODELS="1000000 131072 zai-coding-plan/glm-5.3" "$CCS" use zai >/dev/null 2>&1
+FAKE_LLM_MODELS="1000000 131072 zai-coding-plan/glm-5.3" "$CCS" use zai glm-5.1 >/dev/null 2>&1
 cache="$TEST_CONFIG_DIR/.claude-provider/models-cache"
 assert_eq "use writes the cache" "true" "$([ -f "$cache" ] && echo true || echo false)"
 assert_contains "cache records the window" "zai glm-5.1 1000000 131072" "$(cat "$cache")"
@@ -911,7 +951,7 @@ teardown
 printf '\033[1m[context window: output clamped to window]\033[0m\n'
 setup
 set_all_keys "test-key-123"
-FAKE_LLM_MODELS="200000 384000 deepseek/deepseek-chat" "$CCS" use deepseek >/dev/null 2>&1
+FAKE_LLM_MODELS="200000 384000 deepseek/deepseek-chat" "$CCS" use deepseek deepseek-chat >/dev/null 2>&1
 out=$("$CCS" env)
 assert_contains "output limit clamped to the window" "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='200000'" "$out"
 teardown
@@ -920,7 +960,7 @@ teardown
 printf '\033[1m[models command]\033[0m\n'
 setup
 set_all_keys "test-key-123"
-FAKE_LLM_MODELS="1000000 131072 zai-coding-plan/glm-5.3" "$CCS" use zai >/dev/null 2>&1
+FAKE_LLM_MODELS="1000000 131072 zai-coding-plan/glm-5.3" "$CCS" use zai glm-5.1 >/dev/null 2>&1
 out=$("$CCS" models)
 assert_contains "models lists the main tier" "main" "$out"
 assert_contains "models shows the window" "1.0M" "$out"
@@ -936,7 +976,7 @@ teardown
 printf '\033[1m[llm-models absent]\033[0m\n'
 setup
 set_all_keys "test-key-123"
-PATH="$BARE_PATH" "$CCS" use zai >/dev/null 2>&1
+PATH="$BARE_PATH" "$CCS" use zai glm-5.1 >/dev/null 2>&1
 out=$(PATH="$BARE_PATH" "$CCS" env)
 assert_contains "still exports the model" "ANTHROPIC_MODEL" "$out"
 assert_not_contains "exports no context tokens" "export CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
@@ -952,6 +992,278 @@ FAKE_LLM_MODELS="1000000 131072 zai/glm-5.1" "$CCS" use zai >/dev/null 2>&1
 "$CCS" purge >/dev/null 2>&1
 assert_eq "purge removes the whole dir" "false" \
     "$([ -d "$TEST_CONFIG_DIR/.claude-provider" ] && echo true || echo false)"
+teardown
+
+# --- Automatic model choice (model=auto) ------------------------------------
+# `latest` is stubbed like `resolve`: FAKE_LLM_LATEST is the answer, and the
+# suite-wide default (latest_default) is the tiers zai used to pin.
+
+# -- auto: what a launch actually sends --
+printf '\033[1m[auto model: launch]\033[0m\n'
+setup
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+set_all_keys "test-key-123"
+FAKE_LLM_LATEST=$(latest_answer zai/glm-5.3 zai/glm-5.3-flash zai/glm-5.3-flash 1000000 131072)
+out=$("$CCS" use zai 2>&1)
+assert_contains "use shows the pick behind the spec" "auto → glm-5.3-flash (opus glm-5.3, haiku glm-5.3-flash)" "$out"
+assert_contains "use shows the window of the pick" "1.0M context" "$out"
+assert_contains "active keeps the spec" "MODEL=auto" "$(cat "$TEST_CONFIG_DIR/.claude-provider/active")"
+assert_eq "[_defaults] keeps the spec" "auto" "$("$CCS" config get _defaults model)"
+assert_eq "the section keeps the spec" "auto" "$("$CCS" config get zai model)"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>/dev/null)
+assert_contains "launch announces the pick" "auto → glm-5.3-flash (1.0M context)" "$out"
+assert_contains "main model is the fast variant" "ANTHROPIC_MODEL=glm-5.3-flash" "$out"
+assert_contains "opus tier is the flagship" "ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3" "$out"
+assert_contains "sonnet tier is the fast variant" "ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.3-flash" "$out"
+assert_contains "haiku tier is the fast variant" "ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5.3-flash" "$out"
+assert_contains "small fast model follows haiku" "ANTHROPIC_SMALL_FAST_MODEL=glm-5.3-flash" "$out"
+assert_contains "the window comes from the same answer" "CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000" "$out"
+assert_contains "so does the output limit" "CLAUDE_CODE_MAX_OUTPUT_TOKENS=131072" "$out"
+out=$("$CCS" env)
+assert_contains "env exports the pick, never the spec" "export ANTHROPIC_MODEL='glm-5.3-flash'" "$out"
+assert_contains "env exports the opus pick" "ANTHROPIC_DEFAULT_OPUS_MODEL='glm-5.3'" "$out"
+assert_not_contains "env never exports a literal auto" "'auto'" "$out"
+rm -rf "$SHIM_DIR"
+latest_default
+teardown
+
+# -- auto: an explicit tier in the config beats its auto tier --
+printf '\033[1m[auto model: explicit tiers win]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+set_key zai opus_model glm-5.1
+FAKE_LLM_LATEST=$(latest_answer zai/glm-5.3 zai/glm-5.3-flash zai/glm-5.3-flash 1000000 131072)
+"$CCS" use zai >/dev/null 2>&1
+out=$("$CCS" env)
+assert_contains "explicit opus_model wins" "ANTHROPIC_DEFAULT_OPUS_MODEL='glm-5.1'" "$out"
+assert_contains "haiku stays auto" "ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-5.3-flash'" "$out"
+assert_contains "main model stays auto" "export ANTHROPIC_MODEL='glm-5.3-flash'" "$out"
+out=$("$CCS" status)
+assert_contains "status shows the mix" "opus glm-5.1, haiku glm-5.3-flash" "$out"
+latest_default
+teardown
+
+# -- auto: `ccs use <provider> auto` on a pinned section, and back --
+printf '\033[1m[auto model: ccs use <provider> auto]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+set_key zai model glm-5.1
+FAKE_LLM_LATEST=$(latest_answer zai/glm-5.3 zai/glm-5.3-flash zai/glm-5.3-flash 1000000 131072)
+"$CCS" use zai auto >/dev/null 2>&1
+assert_contains "use <provider> auto stores the spec" "MODEL=auto" "$(cat "$TEST_CONFIG_DIR/.claude-provider/active")"
+assert_eq "and in [_defaults]" "auto" "$("$CCS" config get _defaults model)"
+assert_eq "without touching the section" "glm-5.1" "$("$CCS" config get zai model)"
+out=$("$CCS" env)
+assert_contains "the pick is what gets exported" "export ANTHROPIC_MODEL='glm-5.3-flash'" "$out"
+export FAKE_LLM_CALLS="$TEST_CONFIG_DIR/llm-calls"
+"$CCS" use zai glm-4.7 >/dev/null 2>&1
+assert_contains "a pinned model replaces the spec" "MODEL=glm-4.7" "$(cat "$TEST_CONFIG_DIR/.claude-provider/active")"
+out=$("$CCS" env)
+assert_contains "and is exported as is" "export ANTHROPIC_MODEL='glm-4.7'" "$out"
+assert_eq "a pinned model never asks latest" "0" \
+    "$(llm_latest_calls)"
+unset FAKE_LLM_CALLS
+latest_default
+teardown
+
+# -- auto: a filter narrows the catalogue --
+printf '\033[1m[auto model: filter]\033[0m\n'
+setup
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+set_all_keys "test-key-123"
+set_key openrouter model "auto:anthropic/"
+FAKE_LLM_LATEST=$(latest_answer openrouter/anthropic/claude-opus-5 openrouter/anthropic/claude-sonnet-5 openrouter/anthropic/claude-haiku-4.5 1000000 128000)
+export FAKE_LLM_CALLS="$TEST_CONFIG_DIR/llm-calls"
+"$CCS" use openrouter >/dev/null 2>&1
+calls=$(cat "$FAKE_LLM_CALLS")
+assert_contains "the filter reaches llm-models" "--filter anthropic/" "$calls"
+assert_contains "for the endpoint ccs calls" "--endpoint https://openrouter.ai/api" "$calls"
+assert_contains "the cache key carries the filter" "openrouter auto:anthropic/#sonnet" \
+    "$(cat "$TEST_CONFIG_DIR/.claude-provider/models-cache")"
+out=$("$CCS" env)
+assert_contains "the API id keeps the vendor prefix, not the catalogue one" \
+    "export ANTHROPIC_MODEL='anthropic/claude-sonnet-5'" "$out"
+assert_contains "opus tier too" "ANTHROPIC_DEFAULT_OPUS_MODEL='anthropic/claude-opus-5'" "$out"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" with openrouter/auto:anthropic/ 2>/dev/null)
+assert_contains "with <provider>/auto:<filter> launches" "ANTHROPIC_MODEL=anthropic/claude-sonnet-5" "$out"
+set_key openrouter model "auto:my filter"
+err=$("$CCS" use openrouter 2>&1 || true)
+assert_exit "a filter with a space is refused" "1" "$CCS" use openrouter
+assert_contains "and says why" "must not contain spaces" "$err"
+unset FAKE_LLM_CALLS
+rm -rf "$SHIM_DIR"
+latest_default
+teardown
+
+# -- auto: one call, then the cache; 24 hours, not 7 days --
+printf '\033[1m[auto model: cache]\033[0m\n'
+setup
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+set_all_keys "test-key-123"
+cache="$TEST_CONFIG_DIR/.claude-provider/models-cache"
+FAKE_LLM_LATEST=$(latest_answer zai/glm-5.3 zai/glm-5.3-flash zai/glm-5.3-flash 1000000 131072)
+export FAKE_LLM_CALLS="$TEST_CONFIG_DIR/llm-calls"
+"$CCS" use zai >/dev/null 2>&1
+assert_eq "use asks llm-models once" "1" "$(llm_latest_calls)"
+PATH="$SHIM_DIR:$PATH" "$CCS" launch >/dev/null 2>&1
+"$CCS" status >/dev/null 2>&1
+"$CCS" models >/dev/null 2>&1
+assert_eq "launch, status and models answer from the cache" "1" "$(llm_latest_calls)"
+"$CCS" models refresh >/dev/null 2>&1
+assert_eq "models refresh asks again" "2" "$(llm_latest_calls)"
+assert_contains "cache has an opus line" "zai auto#opus 1000000 131072" "$(cat "$cache")"
+assert_contains "cache has a sonnet line" "zai auto#sonnet 1000000 131072" "$(cat "$cache")"
+assert_contains "cache has a haiku line" "zai auto#haiku 1000000 131072" "$(cat "$cache")"
+assert_contains "cache lines carry the catalogue id" "zai/glm-5.3-flash" "$(cat "$cache")"
+assert_eq "cache file is 600" "600" "$(stat -c '%a' "$cache" 2>/dev/null || stat -f '%A' "$cache" 2>/dev/null)"
+# Age the pick to 25 hours: fresh under the 7-day window TTL, stale for auto
+now=$(date +%s)
+awk -v t=$((now - 90000)) '$2 ~ /^auto#/ { $5 = t } { print }' "$cache" > "$cache.tmp" && mv "$cache.tmp" "$cache"
+err=$(FAKE_LLM_LATEST="" "$CCS" env 2>&1 >/dev/null)
+out=$(FAKE_LLM_LATEST="" "$CCS" env 2>/dev/null)
+assert_contains "a stale pick is still used when llm-models has no answer" "export ANTHROPIC_MODEL='glm-5.3-flash'" "$out"
+assert_contains "and ccs says so" "keeping the last pick" "$err"
+assert_contains "naming the pick" "glm-5.3-flash" "$err"
+n=$(llm_latest_calls)
+"$CCS" env >/dev/null 2>&1
+assert_eq "a stale pick is re-asked when llm-models answers" "$((n + 1))" "$(llm_latest_calls)"
+assert_eq "and the cache line is rewritten" "0" \
+    "$(awk -v t=$((now - 90000)) '$2 ~ /^auto#/ && $5 == t' "$cache" | wc -l | tr -d ' ')"
+unset FAKE_LLM_CALLS
+rm -rf "$SHIM_DIR"
+latest_default
+teardown
+
+# -- auto: no answer and nothing cached is an error, never an empty model --
+printf '\033[1m[auto model: nothing to pick]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+err=$(FAKE_LLM_LATEST="" "$CCS" use zai 2>&1 || true)
+assert_exit "no answer and no cache fails" "1" env FAKE_LLM_LATEST="" "$CCS" use zai
+assert_contains "the error names the version needed" "llm-models >= 1.4" "$err"
+assert_contains "and the manual alternative" "ccs use zai <model>" "$err"
+assert_contains "and the endpoint asked" "https://api.z.ai/api/anthropic" "$err"
+assert_eq "nothing was activated" "false" \
+    "$([ -f "$TEST_CONFIG_DIR/.claude-provider/active" ] && echo true || echo false)"
+err=$(PATH="$BARE_PATH" "$CCS" use zai 2>&1 || true)
+assert_exit "no llm-models at all fails too" "1" env PATH="$BARE_PATH" "$CCS" use zai
+assert_contains "and says it is not installed" "not installed" "$err"
+err=$(FAKE_LLM_OLD=1 "$CCS" use zai 2>&1 || true)
+assert_exit "an llm-models without latest fails" "1" env FAKE_LLM_OLD=1 "$CCS" use zai
+assert_contains "and points at the upgrade" "brew upgrade llm-models" "$err"
+assert_exit "a pinned model still works" "0" "$CCS" use zai glm-5.1
+teardown
+
+# -- auto on [anthropic]: nothing pinned, nothing asked --
+printf '\033[1m[auto model: anthropic pins nothing]\033[0m\n'
+setup
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+set_all_keys "sk-ant-test"
+export FAKE_LLM_CALLS="$TEST_CONFIG_DIR/llm-calls"
+out=$("$CCS" use anthropic 2>&1)
+assert_contains "use says nothing is pinned" "claude picks its own default" "$out"
+assert_contains "active keeps the spec" "MODEL=auto" "$(cat "$TEST_CONFIG_DIR/.claude-provider/active")"
+out=$(PATH="$SHIM_DIR:$PATH" ANTHROPIC_MODEL=stale "$CCS" launch 2>/dev/null)
+assert_contains "the key is sent" "ANTHROPIC_API_KEY=sk-ant-test" "$out"
+assert_not_contains "no ANTHROPIC_MODEL at all, not even an inherited one" "ANTHROPIC_MODEL" "$out"
+out=$("$CCS" env)
+assert_contains "env unsets ANTHROPIC_MODEL" "unset ANTHROPIC_MODEL" "$out"
+assert_not_contains "and exports none" "export ANTHROPIC_MODEL" "$out"
+assert_eq "llm-models was never asked" "0" \
+    "$(llm_latest_calls)"
+out=$("$CCS" status)
+assert_contains "status says nothing is pinned" "claude picks its own default" "$out"
+assert_not_contains "and sizes no window" "Context:" "$out"
+assert_exit "models exits cleanly" "0" "$CCS" models
+assert_contains "and explains" "nothing pinned" "$("$CCS" models)"
+unset FAKE_LLM_CALLS
+rm -rf "$SHIM_DIR"
+teardown
+
+# -- auto: what status, list and models show --
+printf '\033[1m[auto model: status, list and models]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+FAKE_LLM_LATEST=$(latest_answer zai/glm-5.3 zai/glm-5.3-flash zai/glm-5.3-flash 1000000 131072)
+"$CCS" use zai >/dev/null 2>&1
+out=$("$CCS" status)
+assert_contains "status shows spec and pick" "Model:     auto → glm-5.3-flash (opus glm-5.3, haiku glm-5.3-flash)" "$out"
+assert_contains "status names the picker" "Picked by: llm-models latest" "$out"
+assert_contains "status shows the window of the pick" "1.0M tokens" "$out"
+out=$("$CCS" list)
+assert_contains "list shows the cached pick for the provider used" "auto → glm-5.3-flash" "$out"
+assert_contains "list shows an unresolved spec as such" "auto (not resolved yet)" "$out"
+assert_contains "list says anthropic pins nothing" "auto (claude's default)" "$out"
+out=$("$CCS" models)
+opus_line=$(printf '%s\n' "$out" | grep '^  opus ')
+assert_contains "models shows the opus pick" "glm-5.3 " "$opus_line"
+assert_contains "models shows the catalogue id" "zai/glm-5.3" "$opus_line"
+assert_contains "models credits the cache" "cache" "$opus_line"
+assert_contains "models says who picked" "Picked by llm-models latest (model=auto" "$out"
+out=$("$CCS" models refresh)
+opus_line=$(printf '%s\n' "$out" | grep '^  opus ')
+assert_contains "models refresh credits llm-models" "llm-models" "$opus_line"
+latest_default
+teardown
+
+# -- auto: doctor checks that latest is available --
+printf '\033[1m[auto model: doctor]\033[0m\n'
+setup
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\necho CLAUDE_RAN\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+BARE_DIR=$(mktemp -d)
+for b in sh sed awk grep find mkdir mktemp date cat cp rm mv ls chmod rmdir \
+         head tail tr wc uname diff sort stat env dirname basename rev cut \
+         touch sleep kill expr; do
+    p=$(command -v "$b" 2>/dev/null) && ln -sf "$p" "$BARE_DIR/$b"
+done
+set_key zai api_key test-key-123
+set_key kimi api_key test-key-123
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1)
+assert_contains "doctor reports latest available" "model=auto in [zai kimi]: llm-models latest available" "$out"
+assert_exit "and passes" "0" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+out=$(PATH="$SHIM_DIR:$BARE_DIR" "$CCS" doctor 2>&1)
+assert_contains "missing llm-models is a warn naming auto" "model=auto in [zai kimi] but llm-models is missing" "$out"
+assert_exit "but not a fail" "0" env PATH="$SHIM_DIR:$BARE_DIR" "$CCS" doctor
+out=$(FAKE_LLM_OLD=1 PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1)
+assert_contains "an old llm-models is a warn naming the version" "needs >= 1.4" "$out"
+assert_exit "and not a fail either" "0" env FAKE_LLM_OLD=1 PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+"$CCS" use zai >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1)
+assert_contains "the active line shows the cached pick" "zai / auto → glm-5.1 (cache)" "$out"
+rm -rf "$SHIM_DIR" "$BARE_DIR"
+teardown
+
+# -- the shipped template and the inline fallback config agree --
+printf '\033[1m[auto model: template and inline config agree]\033[0m\n'
+setup
+CMP_DIR=$(mktemp -d)
+awk "/<<'TMPL'\$/ { on = 1; next } /^TMPL\$/ { on = 0 } on" "$CCS" \
+    | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' > "$CMP_DIR/inline"
+grep -v '^[[:space:]]*#' "$(dirname "$CCS")/config.template" \
+    | grep -v '^[[:space:]]*$' > "$CMP_DIR/template"
+assert_eq "the inline fallback is the template, comments aside" "" \
+    "$(diff "$CMP_DIR/inline" "$CMP_DIR/template" || true)"
+for p in anthropic deepseek zai kimi qwen minimax; do
+    assert_eq "template: [$p] is model=auto" "auto" "$("$CCS" config get "$p" model)"
+    assert_eq "template: [$p] pins no opus tier" "" "$("$CCS" config get "$p" opus_model)"
+    assert_eq "template: [$p] pins no haiku tier" "" "$("$CCS" config get "$p" haiku_model)"
+done
+for p in openrouter doubao; do
+    m=$("$CCS" config get "$p" model)
+    case "$m" in auto|auto:*) is_auto=true ;; *) is_auto=false ;; esac
+    assert_eq "template: [$p] stays explicit ($m)" "false" "$is_auto"
+done
+rm -rf "$CMP_DIR"
 teardown
 
 # --- Keep awake (ccs caffeine) --------------------------------------------
@@ -1049,7 +1361,7 @@ teardown
 printf '\033[1m[caffeine and ccs env]\033[0m\n'
 setup
 set_all_keys "sk-ant-test"
-"$CCS" use anthropic >/dev/null 2>&1
+"$CCS" use anthropic claude-sonnet-5 >/dev/null 2>&1
 "$CCS" caffeine on >/dev/null 2>&1
 out=$("$CCS" env 2>/dev/null)
 assert_not_contains "the note stays off stdout" "cannot keep a machine awake" "$out"
@@ -1246,6 +1558,8 @@ SHIM_DIR=$(mktemp -d)
 printf '#!/bin/sh\necho "CLAUDE_ARGV:$*"\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
 chmod +x "$SHIM_DIR/claude"
 set_all_keys "test-key-123"
+set_key deepseek model deepseek-chat
+set_key deepseek opus_model deepseek-reasoner
 "$CCS" use zai >/dev/null 2>&1
 before_active=$(cat "$ACTIVE")
 before_config=$(cat "$CFG")
@@ -1745,7 +2059,7 @@ SHIM_DIR=$(mktemp -d)
 printf '#!/bin/sh\necho CLAUDE_RAN\n' > "$SHIM_DIR/claude"
 chmod +x "$SHIM_DIR/claude"
 set_all_keys "test-key-123"
-PATH="$NOGIT_DIR" "$CCS" use zai >/dev/null 2>&1
+PATH="$NOGIT_DIR" "$CCS" use zai glm-5.1 >/dev/null 2>&1
 out=$(PATH="$SHIM_DIR:$NOGIT_DIR" "$CCS" launch 2>&1)
 assert_contains "the rest of ccs still works without git" "CLAUDE_RAN" "$out"
 rm -rf "$NOGIT_DIR" "$SHIM_DIR"
@@ -2035,7 +2349,7 @@ printf '\033[1m[regression: leading-zero token counts]\033[0m\n'
 setup
 set_key anthropic api_key sk-ant-test
 set_key anthropic context_tokens 0100000
-"$CCS" use anthropic >/dev/null 2>&1
+"$CCS" use anthropic claude-sonnet-5 >/dev/null 2>&1
 assert_contains "0100000 reads as 100K, not 32K" "100K" "$("$CCS" status)"
 teardown
 

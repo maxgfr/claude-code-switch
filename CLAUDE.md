@@ -39,7 +39,8 @@ thing. It now checks validity first and says what the user has to clean up by ha
   provider has since vanished from the config. A blanked key on the active provider is an error at
   launch (the provider was chosen explicitly), unlike the `[_defaults]` path which stays vanilla
 - **Model cache**: `~/.claude-provider/models-cache` stores resolved context windows (survives
-  `reset`, removed by `purge`)
+  `reset`, removed by `purge`). `model=auto` picks live in the same file under `<spec>#<tier>` keys
+  with their own 24 h TTL (`MODELS_CACHE_AUTO_TTL`)
 - **Sync state**: `~/.claude-provider/sync/` (git working copy), `sync-backup/<timestamp>/`
   (pre-restore snapshots), `sync-state` (last sync epoch + commit). All survive `reset`, all
   removed by `purge`
@@ -399,11 +400,15 @@ config.
   can't win) and falls back to `info --json` + awk for older versions
 - Answers are cached in `~/.claude-provider/models-cache` (`provider model ctx out epoch id`, one
   line each, 7-day TTL, `-` for unknown fields). A stale entry is still used when a lookup fails.
-  `ccs purge` removes it with the rest of the dir; `ccs reset` deliberately does not
+  `ccs purge` removes it with the rest of the dir; `ccs reset` deliberately does not. An auto pick
+  is three lines in the same format, `model` being `auto#opus` / `auto#sonnet` / `auto#haiku` (or
+  `auto:<filter>#…`), field 6 the full catalogue id (`zai/glm-5.3`)
 - Resolution order in `load_limits`: `auto_context=false` → `context_tokens=`/`max_output_tokens=`
   in the provider section → fresh cache → llm-models → stale cache → unknown (env var not set)
 - `test.sh` shadows `llm-models` with a stub on `PATH` for the whole suite (`FAKE_LLM_MODELS` holds
-  the answer, unset means no match) so CI never touches the network
+  the `resolve` answer, unset means no match; `FAKE_LLM_LATEST` the `latest` answer, defaulting to
+  the tiers zai used to pin so the template's `model=auto` resolves everywhere; `FAKE_LLM_OLD`
+  fakes a < 1.4 install; `FAKE_LLM_CALLS` journals every call) so CI never touches the network
 - **Do not reach for `modelOverrides` to silence the leftover
   `[claude-code:unrecognized_model]` diagnostic.** Its schema is `Record<string,string>` mapping an
   Anthropic model id to a provider-specific one, so an entry makes Claude Code resolve the model to
@@ -411,11 +416,66 @@ config.
   Anthropic model's window instead. It also lives in `~/.claude/settings.json`, off-limits outside
   `ccs notify`. Verified live: the context warning goes away, that one diagnostic line stays
 
+## Automatic model choice (`model=auto`)
+
+- **The spec is persisted, never the pick.** `cmd_use` writes `auto[:filter]` into `active` and
+  `[_defaults] model=`; `load_state` hands it back to `resolve_provider` and the pick is made again
+  at every launch. Persisting the pick would freeze a snapshot, which is the thing auto exists to
+  avoid
+- **`resolve_provider` is the single resolver.** Every path that turns a section into `ACTIVE_*`
+  (`use`, `with`, `load_state` for launch/env/status/models) goes through it, so nobody else ever
+  sees a literal `auto`. `ACTIVE_AUTO` holds the spec when the main model was auto, else empty
+- **`latest` replaces `resolve` for the whole tier set.** One subprocess answers opus, sonnet and
+  haiku with their windows; `load_limits` short-circuits on the `AUTO_*` slots before the cache
+  chain, so the main model never reaches `llm_lookup` and `ccs models` shows the opus/haiku rows
+  without a call. The window is the sonnet line's — the main model
+- **The API id is the catalogue id minus its first segment** (`${id#*/}`), not its last:
+  `openrouter/anthropic/claude-sonnet-5` must launch as `anthropic/claude-sonnet-5`
+- **Explicit tiers win.** `opus_model=` / `haiku_model=` in the section override their auto pick;
+  the main model is always the sonnet pick
+- **Three cache lines per spec, `<spec>#<tier>`**, through the unchanged `cache_lookup` /
+  `cache_store`. Freshness is the sonnet line's age against `MODELS_CACHE_AUTO_TTL` (24 h): a model
+  choice should follow a release faster than a context window. Opus/haiku fall back on the sonnet
+  line. The filter may not contain whitespace — it is a field in a space-split line — so
+  `resolve_provider` dies on one. Note that `cache_lookup` passes the key through `awk -v`, which
+  does escape processing: fine for `#` and `:`, as it already was for model ids
+- **Stale is used with a warning; nothing cached dies.** `resolve_auto_models` never lets a launch
+  go out with an empty `ANTHROPIC_MODEL`. The die is explicit because `resolve_provider` runs under
+  `||` / `if` where `set -e` is off — same reason as its `|| exit 1`. The two messages name the
+  version needed (llm-models >= 1.4) and the manual alternative (`ccs use <p> <model>`)
+- **The launch does not probe.** It calls `latest` and treats a failure as "no answer", one
+  subprocess. `ccs doctor` alone probes, offline, by grepping `latest` out of the command list of
+  `llm-models --help` — **not** `llm-models latest --help`: Commander answers that with the global
+  help and exit 0 on 1.3.1, which made doctor report `ok` against the very version it was meant
+  to catch. It lives in `doctor_config` because the config has to be parsed first
+- **No `base_url` means nothing pinned.** `[anthropic] model=auto` sets `ACTIVE_MODEL=""` with no
+  lookup; `launch_resolved` has `-u ANTHROPIC_MODEL` at the head of the Anthropic `env` list and
+  passes `${ACTIVE_MODEL:+"ANTHROPIC_MODEL=$ACTIVE_MODEL"}` (the `${tz:+"TZ=$tz"}` idiom), so the
+  variable is absent rather than empty; `cmd_env` prints `unset`. The third-party branch never
+  sees an empty model: `resolve_auto_models` dies first
+- **`cmd_list` reads the cache only.** It walks every provider, and N subprocesses is what the
+  launch-path rule forbids: `auto → <pick>`, `auto (not resolved yet)`, or `auto (claude's default)`
+- **`AUTO_REFRESH` is set before `load_state`** in `cmd_models refresh`: the resolution runs
+  inside `load_state`, so a flag set afterwards would refresh nothing
+- **A relaunch reuses the pick.** `relaunch_loop` re-executes the same argv hours later; the model
+  resolved at the start is what `--continue` gets, which is also the only thing that makes sense
+  mid-conversation
+- `auto_context=false` switches the window off, not the pick: `resolve_provider` runs before
+  `load_limits` looks at it
+- Old `active` files cannot carry `auto` (it did not exist), but a hand-edited one whose provider
+  vanished from the config is refused in `load_state`'s legacy branch rather than launched as
+  `ANTHROPIC_MODEL=auto`
+- Ordering of `ccs use` output: the pick is shown as `auto → <main> (opus <o>, haiku <h>)` by
+  `model_label`, shared with `status`, the launch line (`short` form) and `doctor`
+
 ## Adding a new provider
 
-1. Add `[provider_name]` section to `config.template` with `base_url`, `api_key`, `model`
+1. Add `[provider_name]` section to `config.template` with `base_url`, `api_key`, `model` —
+   `model=auto` when llm-models knows the endpoint (check with `llm-models latest --endpoint <url>`),
+   an explicit id otherwise. Multi-vendor catalogues stay explicit; `auto:<filter>` is available
 2. Add the same section to the inline fallback config in `require_config()` inside `ccs`
-   (the two must stay byte-compatible — the inline heredoc is the manual-install path)
+   (the two must stay byte-compatible — the inline heredoc is the manual-install path; a test
+   diffs them, comments aside)
 3. Update README.md providers table
 4. The provider **must** support the Anthropic Messages API format
 

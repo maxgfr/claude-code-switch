@@ -11,6 +11,8 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
 - **9 built-in providers**: Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, Doubao, Custom
 - **Native login**: `ccs use claude` configures nothing at all — same account, same session as running `claude`, so keep-awake and sync work on your normal Claude subscription too
 - **Default model**: configurable globally and per provider
+- **Automatic model choice**: `model=auto` lets llm-models pick the newest flagship and its fast
+  variant per tier for that endpoint, so a new generation needs no config edit
 - **Right-sized context window**: detects each model's real window so auto-compact stops assuming 200k
 - **Config backup & sync**: push `~/.claude` to a gist or private repo, restore it on any machine
 - **Keep awake**: `ccs caffeine on` stops the machine sleeping mid-session, for exactly as long as claude runs
@@ -99,7 +101,7 @@ LAUNCH FLAGS
                                 (must come first; everything else goes to claude)
 
 COMMANDS
-    use <provider> [model]      Switch to a provider (saves as default)
+    use <provider> [model|auto] Switch to a provider (saves as default)
     list  (ls)                  List configured providers
     status  (st)                Show active provider and model
     config  (cfg)               Open config file in $EDITOR
@@ -148,11 +150,13 @@ ccs use claude                        # Native login — exactly like running cl
 ccs use anthropic                     # Native endpoint, with your own API key
 ccs use anthropic claude-opus-4-6     # Override model
 ccs use openrouter openai/gpt-4o     # OpenRouter with specific model
-ccs use deepseek deepseek-reasoner   # DeepSeek R1
-ccs use zai glm-5.1                  # Z.AI GLM-5.1
-ccs use kimi                         # Kimi K2.5
-ccs use qwen                         # Qwen 3.5 Plus
-ccs use minimax                      # MiniMax M2.7
+ccs use deepseek deepseek-reasoner   # DeepSeek, one model pinned
+ccs use zai                          # Z.AI — the latest GLM per tier, picked by llm-models
+ccs use zai glm-5.1                  # ...or one pinned
+ccs use openrouter auto:anthropic/   # OpenRouter — the latest Claude per tier
+ccs use kimi                         # Kimi, latest
+ccs use qwen                         # Qwen, latest
+ccs use minimax                      # MiniMax, latest
 ccs use doubao                       # Doubao Seed Code (ByteDance)
 
 # Check state
@@ -183,15 +187,21 @@ All providers expose an Anthropic-compatible Messages API endpoint, confirmed wo
 | Provider     | Base URL                                                  | Default Model                    |
 |--------------|-----------------------------------------------------------|----------------------------------|
 | `claude`     | *(nothing injected — claude's own login)*                 | *(claude's own default)*         |
-| `anthropic`  | *(native endpoint, your API key)*                         | `claude-sonnet-5`              |
+| `anthropic`  | *(native endpoint, your API key)*                         | `auto` *(nothing pinned)*        |
 | `openrouter` | `https://openrouter.ai/api`                               | `anthropic/claude-sonnet-4`      |
-| `deepseek`   | `https://api.deepseek.com/anthropic`                      | `deepseek-chat`                  |
-| `zai`        | `https://api.z.ai/api/anthropic`                          | `glm-5.1`                        |
-| `kimi`       | `https://api.moonshot.ai/anthropic`                       | `kimi-k2.5`                      |
-| `qwen`       | `https://dashscope-intl.aliyuncs.com/apps/anthropic`      | `qwen3.5-plus`                   |
-| `minimax`    | `https://api.minimax.io/anthropic`                        | `MiniMax-M2.7`                   |
+| `deepseek`   | `https://api.deepseek.com/anthropic`                      | `auto`                           |
+| `zai`        | `https://api.z.ai/api/anthropic`                          | `auto`                           |
+| `kimi`       | `https://api.moonshot.ai/anthropic`                       | `auto`                           |
+| `qwen`       | `https://dashscope-intl.aliyuncs.com/apps/anthropic`      | `auto`                           |
+| `minimax`    | `https://api.minimax.io/anthropic`                        | `auto`                           |
 | `doubao`     | `https://ark.cn-beijing.volces.com/api/coding`            | `doubao-seed-code-preview-latest`|
 | `custom`     | *(user-defined)*                                          | *(user-defined)*                 |
+
+`auto` means [llm-models](https://github.com/maxgfr/llm-models) picks the newest models for that
+endpoint at launch — the flagship for the opus tier, its fast variant for the main model — see
+[Automatic model choice](#automatic-model-choice-modelauto). OpenRouter and Doubao stay pinned:
+one is a multi-vendor catalogue where "newest" needs a filter (`auto:anthropic/`), the other is not
+in the catalogue at all.
 
 ### Native login (`claude`)
 
@@ -225,12 +235,13 @@ native=true
 
 [Z.AI](https://z.ai) offers a **Coding Plan** optimized for AI-powered coding tools like Claude Code:
 
-- **Models**: GLM-5.1, GLM-5, GLM-4.7, GLM-4.6
+- **Models**: GLM-5.3, GLM-5.3-Flash, GLM-5.1, GLM-4.7, …
 - **Plans**: Coding Lite ($6/mo), Standard ($10/mo), Pro ($30/mo)
 - **Get your API key**: [z.ai/manage-apikey](https://z.ai/manage-apikey/apikey-list)
 
 ```sh
-ccs use zai glm-5.1
+ccs use zai            # model=auto: GLM-5.3 as opus, GLM-5.3-Flash as the main model
+ccs use zai glm-5.1    # or pin one
 ccs
 ```
 
@@ -265,7 +276,7 @@ native=true
 [anthropic]
 base_url=
 api_key=sk-ant-your-key-here
-model=claude-sonnet-5
+model=auto
 
 [openrouter]
 base_url=https://openrouter.ai/api
@@ -275,9 +286,13 @@ model=anthropic/claude-sonnet-4
 [zai]
 base_url=https://api.z.ai/api/anthropic
 api_key=your-zai-key-here
-model=glm-5.1
-opus_model=glm-5.1
-haiku_model=glm-4.7
+model=auto
+
+[kimi]
+base_url=https://api.moonshot.ai/anthropic
+api_key=your-kimi-key-here
+model=auto
+opus_model=kimi-k2.5    # an explicit tier still wins over its auto pick
 ```
 
 - **`[_defaults]`** — global default provider and model
@@ -285,9 +300,12 @@ haiku_model=glm-4.7
 - **`base_url=`** — empty for `[anthropic]` uses native Anthropic API (no `ANTHROPIC_BASE_URL`)
 - **`native=`** — `true` makes the section the native login: ccs exports nothing and every other key
   in that section is ignored. That is what `[claude]` is
-- **`model=`** — main model (maps to sonnet/default tier in `/models`)
-- **`opus_model=`** — optional, for `/models` opus tier (falls back to `model`)
-- **`haiku_model=`** — optional, for `/models` haiku tier + fast tasks (falls back to `model`)
+- **`model=`** — main model (maps to sonnet/default tier in `/models`), or `auto` /
+  `auto:<filter>` to let llm-models pick (see [Automatic model choice](#automatic-model-choice-modelauto))
+- **`opus_model=`** — optional, for `/models` opus tier (falls back to `model`, or overrides the
+  auto pick for that tier)
+- **`haiku_model=`** — optional, for `/models` haiku tier + fast tasks (falls back to `model`, or
+  overrides the auto pick for that tier)
 - **`context_tokens=`** — optional, pins the context window (plain integer; empty means auto)
 - **`max_output_tokens=`** — optional, pins the output limit (plain integer; empty means auto)
 - **`auto_context=`** — in `[_defaults]`, set to `false` to disable the automatic lookup
@@ -325,6 +343,46 @@ ccs config get zai model              # prints the value, empty if unset
 `config set` creates the section when it is missing. An `api_key=` changed this way is live at the
 next launch: `ccs use` does not need to run again.
 
+## Automatic model choice (`model=auto`)
+
+Pinning a model id means editing the config at every new generation, and a shipped template that is
+always one release behind. `model=auto` hands the choice to [llm-models](https://github.com/maxgfr/llm-models),
+scoped to the endpoint in `base_url`:
+
+```sh
+ccs use zai
+>>> Switched to zai / auto → glm-5.3-flash (opus glm-5.3, haiku glm-5.3-flash) (1.0M context)
+```
+
+`llm-models latest` looks at the catalogue for that endpoint, drops what Claude Code cannot use
+(deprecated models, models without tool calling, previews, batch and free variants, vision / audio /
+embedding specialists) and picks:
+
+| Tier                         | Pick                                                        |
+|------------------------------|-------------------------------------------------------------|
+| opus                         | the newest flagship                                          |
+| main model, sonnet, haiku    | its fast variant (`-flash`, `-turbo`, `-mini`, …) of the same generation, or the flagship itself when there is none |
+
+Sonnet is what Claude Code runs by default, so the main model is the fast one; Opus is the strong
+tier you reach for on purpose. `opus_model=` or `haiku_model=` set explicitly in the section still
+win over their auto pick, so the two ways mix. `ccs use <provider> <model>` pins one; `ccs use
+<provider> auto` goes back.
+
+`auto:<filter>` keeps only the catalogue ids containing the filter (no spaces), which is what a
+multi-vendor endpoint needs: `ccs use openrouter auto:anthropic/` picks the latest Claude of each
+family. On `[anthropic]` itself, `auto` pins **nothing** — no `ANTHROPIC_MODEL` is exported at all
+and claude keeps its own defaults.
+
+The pick is cached for 24 hours in `~/.claude-provider/models-cache` (windows are cached 7 days;
+a model choice should follow a release faster), so a launch costs no subprocess. `ccs models` shows
+the pick and its source, `ccs models refresh` asks again. When llm-models gives no answer the last
+pick is kept with a warning; with nothing cached ccs refuses to launch rather than send an empty
+model, and the error names the fix. What gets saved by `ccs use` is the spec, never the pick: a
+relaunch a week later re-asks.
+
+This needs llm-models **1.4 or later** (`brew upgrade llm-models`); `ccs doctor` says so when
+yours is older. A pinned model needs nothing.
+
 ## Context window
 
 Claude Code assumes a **200k** context window for any model it doesn't ship in its own table, so on
@@ -351,10 +409,17 @@ ccs models clear     # drop the cache
 ```
 
 ```
-  Tier     Model         Context   Output    Source         Resolved as
-  main     glm-5.3       1.0M      131K      llm-models     zai-coding-plan/glm-5.3
-  haiku    glm-4.7       204K      131K      cache          zai/glm-4.7
+  Tier     Model           Context   Output    Source         Resolved as
+  main     glm-5.3-flash   1.0M      131K      cache          zai/glm-5.3-flash
+  opus     glm-5.3         1.0M      131K      cache          zai/glm-5.3
+  sonnet   glm-5.3-flash   1.0M      131K      cache          zai/glm-5.3-flash
+  haiku    glm-5.3-flash   1.0M      131K      cache          zai/glm-5.3-flash
+
+  Picked by llm-models latest (model=auto, cache) — ccs models refresh re-asks, ccs use zai <model> pins one.
 ```
+
+With `model=auto` the windows come from the same answer as the models, so the whole table costs one
+call; a pinned model is looked up on its own.
 
 The lookup uses [**llm-models**](https://github.com/maxgfr/llm-models), which Homebrew installs
 alongside `ccs`. If you installed `ccs` by hand instead, add it:
@@ -365,7 +430,7 @@ brew install maxgfr/tap/llm-models
 
 `ccs` still runs without it — you just get no window, exactly as before — so a broken or missing
 install degrades rather than breaks. Answers are cached in `~/.claude-provider/models-cache` for 7
-days, so the launch path stays free of subprocesses, and a stale entry is still used when the lookup
+days (auto picks: 24 hours), so the launch path stays free of subprocesses, and a stale entry is still used when the lookup
 fails (offline, say).
 
 Because the same model id is published by many providers with different limits, the lookup is scoped
@@ -619,6 +684,7 @@ something is actually broken:
   config; `~/.claude/settings.json` is not valid JSON; a ccs hook in it points to a script that no
   longer exists (regenerate with `ccs notify on` / `ccs sync hooks on`, or detach with `off`)
 - **warn** — an optional tool is missing (`jq`, `git`, `llm-models`) with what that switches off;
+  `model=auto` is configured but llm-models is missing or older than 1.4 (no `latest` command);
   caffeine is on but no keep-awake tool works here (WSL included); a config section the parser
   skips; permissions looser than `700` on `~/.claude-provider` or `600` on `config` / `active`
 - **info as ok** — the active provider, the sync remote and whether its working copy exists
@@ -672,7 +738,7 @@ that branch of the `exec` is nothing but `env -u ... claude`, plus the keep-awak
 | `ANTHROPIC_BASE_URL`            | Third-party providers only (unset for native)      |
 | `ANTHROPIC_AUTH_TOKEN`          | Third-party providers only (avoids API key prompt) |
 | `ANTHROPIC_API_KEY`             | Native Anthropic only                              |
-| `ANTHROPIC_MODEL`               | Always                                             |
+| `ANTHROPIC_MODEL`               | Always — except `[anthropic]` with `model=auto` (unset) |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL`  | Third-party — maps to `opus_model` in config       |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL`| Third-party — maps to `model` in config            |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Third-party — maps to `haiku_model` in config      |
@@ -683,7 +749,9 @@ that branch of the `exec` is nothing but `env -u ... claude`, plus the keep-awak
 
 The provider and model chosen with `ccs use` are persisted in `~/.claude-provider/active` so `ccs`
 works across shell sessions. The key, endpoint and tier models are read from the config at every
-launch, so editing `api_key=` is enough — no need to run `ccs use` again. Run `ccs reset` to clear
+launch, so editing `api_key=` is enough — no need to run `ccs use` again. With `model=auto` it is
+the spec that is persisted, and the pick is resolved again at every launch (from the 24-hour cache
+when it is fresh). Run `ccs reset` to clear
 the active provider, or `ccs purge` to remove all ccs data.
 
 Everything ccs owns lives in `~/.claude-provider/`: `config`, `active`, `models-cache`,
