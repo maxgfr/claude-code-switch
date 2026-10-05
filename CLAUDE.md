@@ -12,7 +12,7 @@
 
 **Two exceptions, both opt-in:**
 
-1. `ccs notify on|off` edits `~/.claude/settings.json` (hooks + `preferredNotifChannel`). Backed up to `~/.claude-provider/settings-backup.json`, fully reversed by `notify off`. Requires jq.
+1. `ccs notify on|off` edits `~/.claude/settings.json` (one `Notification` hook). Backed up to `~/.claude-provider/settings-backup.json`, fully reversed by `notify off`. Requires jq. It never sets `preferredNotifChannel`; it only gives back the value an older ccs had forced, when migrating that install.
 2. `ccs sync pull|import` writes into `~/.claude`, restricted to `$SYNC_PATHS`; `ccs sync hooks on` adds `SessionStart`/`SessionEnd` entries to `~/.claude/settings.json`. Every write is preceded by a snapshot into `~/.claude-provider/sync-backup/<timestamp>/`. Requires git.
 
 `purge` detaches both hook families before deleting anything — but never lets that stop it. The
@@ -124,7 +124,7 @@ thing. It now checks validity first and says what the user has to clean up by ha
   new settings section means picking a `_` name, nothing else
 - All writes to `~/.claude/settings.json` go through `settings_prepare` / `settings_attach_hook` /
   `settings_detach_hooks`. Detach is **scoped by event name**, which is what lets `notify` own
-  `Stop`/`Notification` and `sync` own `SessionStart`/`SessionEnd` without either clobbering the
+  `Notification` (and clean up the `Stop` entry older versions left) and `sync` own `SessionStart`/`SessionEnd` without either clobbering the
   other. Both also share `$HOOKS_DIR`, so neither may `rm -rf` it — only its own scripts, then
   `rmdir` if empty
 - All providers must expose an **Anthropic Messages API** compatible endpoint — except a
@@ -378,11 +378,47 @@ config.
 
 ## Notifications (`ccs notify`)
 
-- `notify on [terminal]` generates three POSIX sh hook scripts (heredocs embedded in `ccs`) into `~/.claude-provider/hooks/`: `notify-emit.sh` (terminal detection + OSC emission), `notify-stop.sh` (Stop hook), `notify-attention.sh` (Notification hook, filters `notification_type`), then jq-merges references into `~/.claude/settings.json`
-- `SubagentStop` is deliberately NOT hooked and `agent_completed` notifications are ignored — subagents/background tasks must stay silent
-- Terminal methods: ghostty/wezterm → OSC 777, iterm2 → OSC 9, kitty → OSC 99, macos → osascript, bell → BEL only. All also emit a standalone BEL (dock badge/bounce). `auto` (default) detects at hook runtime via `TERM_PROGRAM`/`KITTY_WINDOW_ID`
-- Idempotent merge: entries whose command contains `/.claude-provider/hooks/` (`$CCS_HOOK_MARKER`) are replaced, never duplicated; user's other settings are preserved. The merge goes through the shared `settings_*` helpers and touches **only** `Stop` and `Notification`
-- `notify off` restores the previous `preferredNotifChannel` (saved in `~/.claude-provider/notify-state` on first install)
+- **It follows the official model** (code.claude.com/docs/en/terminal-config, settings
+  `preferredNotifChannel`, hooks `Notification`). Claude Code's own channel, `auto` by default,
+  already posts a desktop notification in Ghostty, Kitty and iTerm2 when the user seems away, and
+  `agent_completed` only fires with the agent view open. `notify on` therefore **never writes
+  `preferredNotifChannel`**: one `Notification` hook fills the gap in the terminals Claude Code
+  does not notify in, and nothing else
+- `notify on [terminal]` generates one POSIX sh script, `~/.claude-provider/hooks/notify.sh`
+  (heredoc in `write_hook_script`), and attaches it to `Notification` through the shared
+  `settings_*` helpers. `CCS_NOTIFY_METHOD` on its third line is the pinned terminal, which is what
+  `notify status` reads
+- **No `Stop` hook.** One per turn rang while the user was watching; a finished task reaches them
+  through `idle_prompt` (~60 s, only when away), like the native behaviour
+- The hook notifies only for what waits on the user: `permission_prompt`, `idle_prompt`,
+  `elicitation_dialog`, `elicitation_url_dialog`, `agent_needs_input`, `quota_auto_resume_stale`,
+  `quota_auto_resume_disabled`. Everything else exits 0 with no output. The body is `.message`
+  (fixed label per type as fallback) with every control byte stripped — it lands inside an escape
+  sequence — and `;` → `,` for OSC 777, whose fields are `;`-separated
+- Detection (at hook runtime, `auto`) reads variables that survive tmux, where `TERM_PROGRAM` is
+  `tmux`: `GHOSTTY_RESOURCES_DIR`, `KITTY_WINDOW_ID`, `LC_TERMINAL=iTerm2`, `WEZTERM_PANE`,
+  `WT_SESSION`. Ghostty/Kitty/iTerm2 → **silent exit** (native); WezTerm, Windows Terminal → OSC 9;
+  Warp → OSC 777; else Darwin + `osascript`, Linux + `notify-send` with a display, else BEL. Every
+  emitted sequence ends with a bare BEL. All of it is on the `terminalSequence` allow-list —
+  WezTerm is OSC 9 there, not 777
+- `osascript` gets title and body as **argv** (`on run argv`), never spliced into the script: the
+  body comes from `.message` and used to be an AppleScript injection
+- `CCS_NOTIFY_TEST=1` makes the native terminals emit their sequence anyway (and adds `method` to
+  the JSON), so `notify test` checks the terminal's own permissions. Claude Code never sets it
+- **Migration** (`notify_cleanup_legacy`, run by both `on` and `off`): older versions installed a
+  `Stop` hook, `notify-emit.sh` / `notify-stop.sh` / `notify-attention.sh`, and forced the channel
+  to `notifications_disabled`, saving the old value in `~/.claude-provider/notify-state`. The
+  cleanup detaches marker entries from `Stop` and `Notification`, removes the three scripts, and
+  restores `PREV_CHANNEL` **only while the channel still reads `notifications_disabled`** — a
+  value the user set since is theirs. Then the state file goes
+- Install-time advice: iTerm2's two alert settings, a tmux without `allow-passthrough on|all`
+  (`notify_tmux_check`, also in `status` and `test`), and a channel the user set to
+  `notifications_disabled` themselves (warned, never changed)
+- Idempotent merge: entries whose command contains `/.claude-provider/hooks/` (`$CCS_HOOK_MARKER`)
+  are replaced, never duplicated; user's other settings are preserved
+- `test.sh` runs the hook with every terminal variable `env -u`'d and an `osascript` /
+  `notify-send` shim that journals its argv, so the macOS runner never shows anything; `uname` is
+  shadowed to reach both desktop fallbacks on either runner
 
 ## Context window (`ccs models`)
 
