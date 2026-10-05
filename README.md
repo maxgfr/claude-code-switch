@@ -465,34 +465,56 @@ auto_context=false          # disable the lookup entirely
 
 ## Desktop notifications
 
-Get a desktop notification + dock badge when Claude Code **finishes a task** or **asks you something** — and stay silent for subagents and background tasks (no more notification spam from parallel workflows).
+Claude Code already posts a desktop notification in Ghostty, Kitty and iTerm2 when it needs you and
+you seem to be away (its `preferredNotifChannel`, `auto` by default). `ccs notify on` covers the
+other terminals the way the [official docs](https://code.claude.com/docs/en/terminal-config)
+recommend: with one `Notification` hook, only when Claude Code is waiting on **you**.
 
 ```sh
-ccs notify on           # Auto-detect terminal, install hooks
-ccs notify on iterm2    # Or pin: ghostty | iterm2 | wezterm | kitty | macos | bell
-ccs notify test         # Fire a test notification
-ccs notify status       # Show current state
-ccs notify off          # Remove everything, restore previous settings
+ccs notify on           # Auto-detect the terminal at each notification
+ccs notify on wezterm   # Or pin: ghostty | iterm2 | kitty | wezterm | warp | macos | bell
+ccs notify test         # Fire a test notification (also checks the terminal lets it through)
+ccs notify status       # Hook state, preferredNotifChannel, tmux passthrough
+ccs notify off          # Remove the hook
 ```
 
 **Requires [jq](https://jqlang.org)** (`brew install jq`) — only for this command, the rest of `ccs` stays zero-dependency.
 
-| Terminal | Notification | Dock badge on bell |
-|--------------|--------------------------|---------------------|
-| Ghostty | OSC 777 | ✅ (`bell-features = attention`) |
-| WezTerm | OSC 777 | bounce (configurable) |
-| iTerm2 | OSC 9 | ✅ bounce |
-| kitty | OSC 99 | configurable |
-| Terminal.app | `osascript` | ✅ |
-| anything else| bell only | terminal-dependent |
+| Terminal | Who notifies | How |
+|----------|--------------|-----|
+| Ghostty, Kitty, iTerm2 | Claude Code itself (banner) + ccs (bell) | native banner, bare BEL from the hook |
+| WezTerm, Windows Terminal | ccs | OSC 9 |
+| Warp | ccs | OSC 777 |
+| anything else on macOS (Terminal.app, VS Code…) | ccs | `osascript` |
+| anything else on Linux with a display | ccs | `notify-send` |
+| anything else | ccs | bell only |
+
+Every ccs notification rings a bare BEL — in Ghostty, Kitty and iTerm2 too, where it is all the hook sends — which most terminals turn into a dock badge or bounce (Ghostty: `bell-features = attention`).
 
 How it works:
 
-- A `Stop` hook notifies when the main conversation turn ends. Subagents fire `SubagentStop`, which is deliberately **not** hooked — they never notify.
-- A `Notification` hook notifies only when Claude needs *you* (`permission_prompt`, `agent_needs_input`, `elicitation_dialog`, `idle_prompt`) and ignores `agent_completed`, which fires for every background task.
-- The badge only shows while the terminal is unfocused, and clears when you come back.
+- It notifies for what waits on you: `permission_prompt`, `idle_prompt` (the task is done and you
+  have been away ~60 s), `elicitation_dialog`, `elicitation_url_dialog`, `agent_needs_input`,
+  `quota_auto_resume_stale` (press Enter to resume) and `quota_auto_resume_disabled`. Everything
+  else — `agent_completed` for each background task, `auth_success`… — stays silent.
+- The text is Claude Code's own `message`, stripped of control characters.
+- Detection reads variables that survive tmux (`GHOSTTY_RESOURCES_DIR`, `KITTY_WINDOW_ID`,
+  `LC_TERMINAL`, `WEZTERM_PANE`, `WT_SESSION`), so it keeps working inside a tmux session.
+- There is no `Stop` hook: a notification at the end of every turn, while you are watching, is
+  noise. A finished task reaches you through `idle_prompt` once you have looked away.
 
-> **Note:** `ccs notify on` is one of the two exceptions to the zero-interference principle (the other is `ccs sync`): it edits `~/.claude/settings.json` (hooks + `preferredNotifChannel`). It is explicit opt-in, backs up your settings to `~/.claude-provider/settings-backup.json`, and `ccs notify off` restores the previous state. Hook scripts live in `~/.claude-provider/hooks/`.
+Tips:
+
+- **iTerm2**: Settings → Profiles → Terminal → enable "Notification Center Alerts", then Filter
+  Alerts → "Send escape sequence-generated alerts".
+- **tmux**: add `set -g allow-passthrough on` to `~/.tmux.conf`, or no notification gets out.
+  `ccs notify on` and `status` warn when it is off.
+- **macOS fallback**: banners come from Script Editor. If none shows, allow its notifications in
+  System Settings → Notifications.
+- If you set `preferredNotifChannel` to `notifications_disabled`, Ghostty, Kitty and iTerm2 stay
+  silent — `ccs notify on` warns, and leaves it as you set it.
+
+> **Note:** `ccs notify on` is one of the two exceptions to the zero-interference principle (the other is `ccs sync`): it adds one `Notification` hook to `~/.claude/settings.json`. It is explicit opt-in, backs up your settings to `~/.claude-provider/settings-backup.json`, and `ccs notify off` removes the hook. The script lives in `~/.claude-provider/hooks/`. Upgrading from an older ccs, which forced `preferredNotifChannel` off and added a `Stop` hook, undoes both on the next `notify on` or `notify off`.
 
 ## Keep the machine awake
 

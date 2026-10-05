@@ -763,21 +763,52 @@ assert_eq "migration runs exactly once" "1" "$(grep -c '^native=true$' "$CFG")"
 assert_exit "use claude works afterwards" "0" "$CCS" use claude
 teardown
 
+# -- Notify: shims so no hook ever reaches the real desktop --
+# Hooks run with every terminal-identifying variable scrubbed, and with an
+# osascript / notify-send on PATH that only journal their argv, one per line.
+NOTIFY_SHIM=$(mktemp -d)
+for b in osascript notify-send; do
+    # shellcheck disable=SC2016  # expanded by the shim, on purpose
+    printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done > "%s/%s.log"\n' "$NOTIFY_SHIM" "$b" \
+        > "$NOTIFY_SHIM/$b"
+    chmod +x "$NOTIFY_SHIM/$b"
+done
+# notify_hook <json> [VAR=value...] -> the hook's stdout
+notify_hook() {
+    local json="$1"
+    shift
+    printf '%s' "$json" | env -u TERM_PROGRAM -u GHOSTTY_RESOURCES_DIR -u KITTY_WINDOW_ID \
+        -u LC_TERMINAL -u WEZTERM_PANE -u WT_SESSION -u TMUX -u CCS_NOTIFY_TEST \
+        -u DISPLAY -u WAYLAND_DISPLAY PATH="$NOTIFY_SHIM:$PATH" "$@" "$HOOKS/notify.sh"
+}
+# Byte values of the terminalSequence, comma-separated: BEL alone is "7"
+seq_bytes() {
+    printf '%s' "$1" | jq -r '.terminalSequence | explode | map(tostring) | join(",")'
+}
+PERM='{"notification_type":"permission_prompt","message":"Allow Bash?"}'
+# Anything left in the hooks dir besides notify.sh, one name per line
+notify_stray_scripts() {
+    local f
+    for f in "$HOOKS"/*; do
+        [ -e "$f" ] || continue
+        [ "${f##*/}" = "notify.sh" ] || printf '%s\n' "${f##*/}"
+    done
+}
+
 # -- Notify: install --
 printf '\033[1m[notify on]\033[0m\n'
 setup
 SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
 HOOKS="$TEST_CONFIG_DIR/.claude-provider/hooks"
 "$CCS" notify on >/dev/null 2>&1
-assert_eq "emit hook created and executable" "true" "$([ -x "$HOOKS/notify-emit.sh" ] && echo true || echo false)"
-assert_eq "stop hook created and executable" "true" "$([ -x "$HOOKS/notify-stop.sh" ] && echo true || echo false)"
-assert_eq "attention hook created and executable" "true" "$([ -x "$HOOKS/notify-attention.sh" ] && echo true || echo false)"
+assert_eq "hook script created and executable" "true" "$([ -x "$HOOKS/notify.sh" ] && echo true || echo false)"
+assert_eq "no legacy scripts" "" "$(notify_stray_scripts)"
 assert_exit "settings.json is valid JSON" "0" jq empty "$SETTINGS"
-settings=$(cat "$SETTINGS")
-assert_contains "settings references stop hook" "notify-stop.sh" "$settings"
-assert_contains "settings references attention hook" "notify-attention.sh" "$settings"
-assert_contains "settings disables built-in channel" "notifications_disabled" "$settings"
-assert_not_contains "settings has no SubagentStop hook" "SubagentStop" "$settings"
+assert_eq "Notification hooked to notify.sh" "$HOOKS/notify.sh" \
+    "$(jq -r '.hooks.Notification[0].hooks[0].command' "$SETTINGS")"
+assert_eq "no Stop hook" "null" "$(jq -r '.hooks.Stop' "$SETTINGS")"
+assert_eq "built-in channel left absent" "null" "$(jq -r '.preferredNotifChannel' "$SETTINGS")"
+assert_eq "no state file" "false" "$([ -f "$TEST_CONFIG_DIR/.claude-provider/notify-state" ] && echo true || echo false)"
 teardown
 
 # -- Notify: preserves existing settings + idempotent --
@@ -786,25 +817,54 @@ setup
 SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
 mkdir -p "$TEST_CONFIG_DIR/.claude"
 printf '{"model":"opus","preferredNotifChannel":"iterm2"}\n' > "$SETTINGS"
+cp "$SETTINGS" "$TEST_CONFIG_DIR/before.json"
 "$CCS" notify on >/dev/null 2>&1
 assert_eq "existing keys preserved" "opus" "$(jq -r '.model' "$SETTINGS")"
+assert_eq "channel untouched" "iterm2" "$(jq -r '.preferredNotifChannel' "$SETTINGS")"
 "$CCS" notify on >/dev/null 2>&1
-assert_eq "idempotent: one Stop entry" "1" "$(jq '.hooks.Stop | length' "$SETTINGS")"
 assert_eq "idempotent: one Notification entry" "1" "$(jq '.hooks.Notification | length' "$SETTINGS")"
 "$CCS" notify off >/dev/null 2>&1
-assert_eq "off restores previous channel" "iterm2" "$(jq -r '.preferredNotifChannel' "$SETTINGS")"
-assert_eq "off removes hooks key when empty" "null" "$(jq -r '.hooks' "$SETTINGS")"
-assert_eq "off keeps other settings" "opus" "$(jq -r '.model' "$SETTINGS")"
+assert_eq "off leaves settings exactly as before" "$(jq -S . "$TEST_CONFIG_DIR/before.json")" "$(jq -S . "$SETTINGS")"
 assert_eq "off removes hooks dir" "false" "$([ -d "$TEST_CONFIG_DIR/.claude-provider/hooks" ] && echo true || echo false)"
 teardown
 
-# -- Notify: off with no previous channel --
-printf '\033[1m[notify off restores absent channel]\033[0m\n'
+# -- Notify: an install from before 1.10 is migrated --
+# notify_legacy_install <channel now> — Stop + Notification to the old scripts,
+# the channel forced off by ccs, iterm2 remembered as the user's own.
+notify_legacy_install() {
+    mkdir -p "$TEST_CONFIG_DIR/.claude" "$HOOKS"
+    for f in notify-emit.sh notify-stop.sh notify-attention.sh; do
+        printf '#!/bin/sh\n' > "$HOOKS/$f"
+        chmod +x "$HOOKS/$f"
+    done
+    printf 'PREV_CHANNEL=iterm2\n' > "$TEST_CONFIG_DIR/.claude-provider/notify-state"
+    jq -n --arg h "$HOOKS" --arg c "$1" '{model:"opus", preferredNotifChannel:$c, hooks:{
+        Stop:[{hooks:[{type:"command",command:($h+"/notify-stop.sh")}]}],
+        Notification:[{hooks:[{type:"command",command:($h+"/notify-attention.sh")}]},
+                      {hooks:[{type:"command",command:"/usr/local/bin/mine.sh"}]}]}}' > "$SETTINGS"
+}
+for sub in on off; do
+    printf '\033[1m[notify %s migrates a legacy install]\033[0m\n' "$sub"
+    setup
+    SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
+    HOOKS="$TEST_CONFIG_DIR/.claude-provider/hooks"
+    notify_legacy_install notifications_disabled
+    "$CCS" notify "$sub" >/dev/null 2>&1
+    assert_eq "$sub: Stop hook removed" "null" "$(jq -r '.hooks.Stop' "$SETTINGS")"
+    assert_eq "$sub: channel given back" "iterm2" "$(jq -r '.preferredNotifChannel' "$SETTINGS")"
+    assert_eq "$sub: old scripts removed" "" "$(notify_stray_scripts)"
+    assert_eq "$sub: state file removed" "false" "$([ -f "$TEST_CONFIG_DIR/.claude-provider/notify-state" ] && echo true || echo false)"
+    assert_contains "$sub: the user's own Notification hook survives" "/usr/local/bin/mine.sh" "$(cat "$SETTINGS")"
+    assert_not_contains "$sub: no old Notification entry" "notify-attention.sh" "$(cat "$SETTINGS")"
+    teardown
+done
+printf '\033[1m[notify migration keeps a channel the user changed]\033[0m\n'
 setup
 SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
+HOOKS="$TEST_CONFIG_DIR/.claude-provider/hooks"
+notify_legacy_install terminal_bell
 "$CCS" notify on >/dev/null 2>&1
-"$CCS" notify off >/dev/null 2>&1
-assert_eq "channel absent again after off" "null" "$(jq -r '.preferredNotifChannel' "$SETTINGS")"
+assert_eq "a channel changed since is not overwritten" "terminal_bell" "$(jq -r '.preferredNotifChannel' "$SETTINGS")"
 teardown
 
 # -- Notify: pinned terminal + validation --
@@ -812,9 +872,11 @@ printf '\033[1m[notify terminal pinning]\033[0m\n'
 setup
 HOOKS="$TEST_CONFIG_DIR/.claude-provider/hooks"
 "$CCS" notify on iterm2 >/dev/null 2>&1
-assert_contains "method pinned in emit hook" 'CCS_NOTIFY_METHOD="iterm2"' "$(cat "$HOOKS/notify-emit.sh")"
+assert_contains "method pinned in the hook" 'CCS_NOTIFY_METHOD="iterm2"' "$(cat "$HOOKS/notify.sh")"
 out=$("$CCS" notify status)
 assert_contains "status shows on + method" "on (iterm2)" "$out"
+assert_contains "status shows the built-in channel" "preferredNotifChannel" "$out"
+assert_exit "warp is a valid terminal" "0" "$CCS" notify on warp
 assert_exit "invalid terminal rejected" "1" "$CCS" notify on badterm
 assert_exit "invalid subcommand rejected" "1" "$CCS" notify badsub
 teardown
@@ -826,19 +888,81 @@ out=$("$CCS" notify status)
 assert_contains "status shows off" "off" "$out"
 teardown
 
+# -- Notify: install-time advice --
+printf '\033[1m[notify install advice]\033[0m\n'
+setup
+SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
+printf '#!/bin/sh\necho off\n' > "$NOTIFY_SHIM/tmux"
+chmod +x "$NOTIFY_SHIM/tmux"
+out=$(TMUX=/tmp/fake,1,0 PATH="$NOTIFY_SHIM:$PATH" "$CCS" notify on 2>&1)
+assert_contains "tmux without passthrough is called out" "allow-passthrough on" "$out"
+printf '#!/bin/sh\necho on\n' > "$NOTIFY_SHIM/tmux"
+out=$(TMUX=/tmp/fake,1,0 PATH="$NOTIFY_SHIM:$PATH" "$CCS" notify on 2>&1)
+assert_not_contains "tmux with passthrough is fine" "allow-passthrough" "$out"
+rm -f "$NOTIFY_SHIM/tmux"
+out=$(env -u TMUX -u LC_TERMINAL TERM_PROGRAM=iTerm.app "$CCS" notify on 2>&1)
+assert_contains "iTerm2 gets the alert setting to flip" "Notification Center Alerts" "$out"
+jq '.preferredNotifChannel = "notifications_disabled"' "$SETTINGS" > "$SETTINGS.tmp"
+mv "$SETTINGS.tmp" "$SETTINGS"
+out=$(env -u TMUX "$CCS" notify on 2>&1)
+assert_contains "a disabled built-in channel is called out" "notifications_disabled" "$out"
+assert_eq "and left as the user set it" "notifications_disabled" "$(jq -r '.preferredNotifChannel' "$SETTINGS")"
+teardown
+
 # -- Notify: hooks behavior --
-printf '\033[1m[notify hook scripts]\033[0m\n'
+printf '\033[1m[notify hook script]\033[0m\n'
 setup
 HOOKS="$TEST_CONFIG_DIR/.claude-provider/hooks"
-"$CCS" notify on ghostty >/dev/null 2>&1
-out=$(printf '{}' | "$HOOKS/notify-stop.sh")
-assert_contains "stop hook emits terminalSequence" "terminalSequence" "$out"
-assert_contains "stop hook emits OSC 777" "777;notify" "$out"
-out=$(printf '{"notification_type":"permission_prompt"}' | "$HOOKS/notify-attention.sh")
-assert_contains "attention hook notifies on permission_prompt" "terminalSequence" "$out"
-out=$(printf '{"notification_type":"agent_completed"}' | "$HOOKS/notify-attention.sh")
-assert_eq "attention hook ignores agent_completed (subagents)" "" "$out"
-assert_exit "notify test works when installed" "0" "$CCS" notify test
+"$CCS" notify on >/dev/null 2>&1
+out=$(notify_hook "$PERM" TERM_PROGRAM=WezTerm)
+assert_contains "WezTerm gets OSC 9" '\u001b]9;Allow Bash?' "$out"
+assert_eq "plus a bare BEL" "7" "$(seq_bytes "$out" | awk -F, '{print $NF}')"
+out=$(notify_hook "$PERM" WEZTERM_PANE=0 TERM_PROGRAM=tmux)
+assert_contains "WezTerm is still found inside tmux" '\u001b]9;' "$out"
+out=$(notify_hook "$PERM" WT_SESSION=abc)
+assert_contains "Windows Terminal gets OSC 9" '\u001b]9;' "$out"
+out=$(notify_hook "$PERM" TERM_PROGRAM=WarpTerminal)
+assert_contains "Warp gets OSC 777" '\u001b]777;notify;Claude Code;Allow Bash?' "$out"
+for v in TERM_PROGRAM=ghostty GHOSTTY_RESOURCES_DIR=/x KITTY_WINDOW_ID=1 TERM_PROGRAM=iTerm.app LC_TERMINAL=iTerm2; do
+    assert_eq "native terminal ($v): bell only, Claude Code posts the banner" "7" "$(seq_bytes "$(notify_hook "$PERM" "$v")")"
+done
+out=$(notify_hook "$PERM" GHOSTTY_RESOURCES_DIR=/x CCS_NOTIFY_TEST=1)
+assert_contains "test mode: Ghostty gets OSC 777" '\u001b]777;notify' "$out"
+out=$(notify_hook "$PERM" LC_TERMINAL=iTerm2 CCS_NOTIFY_TEST=1)
+assert_contains "test mode: iTerm2 gets OSC 9" '\u001b]9;' "$out"
+out=$(notify_hook "$PERM" KITTY_WINDOW_ID=1 CCS_NOTIFY_TEST=1)
+assert_contains "test mode: kitty gets OSC 99" '\u001b]99;' "$out"
+out=$(notify_hook '{"notification_type":"permission_prompt","message":"a;b\u001b[31mc\u0007d"}' TERM_PROGRAM=WarpTerminal)
+assert_contains "the message is sanitised" ';a,b[31mcd\u0007' "$out"
+out=$(notify_hook '{"notification_type":"idle_prompt"}' TERM_PROGRAM=WezTerm)
+assert_contains "no message falls back to a label" '\u001b]9;Waiting for you' "$out"
+for t in agent_completed auth_success elicitation_complete elicitation_response quota_auto_resume_fired; do
+    assert_eq "$t stays silent" "" "$(notify_hook "{\"notification_type\":\"$t\"}" TERM_PROGRAM=WezTerm)"
+done
+for t in idle_prompt elicitation_dialog elicitation_url_dialog agent_needs_input quota_auto_resume_stale quota_auto_resume_disabled; do
+    assert_contains "$t notifies" "terminalSequence" "$(notify_hook "{\"notification_type\":\"$t\"}" TERM_PROGRAM=WezTerm)"
+done
+# The desktop fallbacks, with uname shadowed so both run on either runner
+printf '#!/bin/sh\necho Darwin\n' > "$NOTIFY_SHIM/uname"
+chmod +x "$NOTIFY_SHIM/uname"
+out=$(notify_hook '{"notification_type":"permission_prompt","message":"say \"hi\" & bye"}')
+assert_eq "osascript fallback rings a BEL" "7" "$(seq_bytes "$out")"
+assert_eq "osascript gets the title as an argument" "Claude Code" "$(tail -n 2 "$NOTIFY_SHIM/osascript.log" | head -n 1)"
+assert_eq "and the body as another, unescaped" 'say "hi" & bye' "$(tail -n 1 "$NOTIFY_SHIM/osascript.log")"
+printf '#!/bin/sh\necho Linux\n' > "$NOTIFY_SHIM/uname"
+out=$(notify_hook "$PERM" DISPLAY=:0)
+assert_eq "notify-send gets title and body" "Claude Code
+Allow Bash?" "$(cat "$NOTIFY_SHIM/notify-send.log")"
+assert_eq "and a BEL is rung" "7" "$(seq_bytes "$out")"
+rm -f "$NOTIFY_SHIM/notify-send.log"
+out=$(notify_hook "$PERM")
+assert_eq "no display: BEL only" "7" "$(seq_bytes "$out")"
+assert_eq "and notify-send is not called" "false" "$([ -f "$NOTIFY_SHIM/notify-send.log" ] && echo true || echo false)"
+rm -f "$NOTIFY_SHIM/uname"
+"$CCS" notify on bell >/dev/null 2>&1
+assert_eq "bell pinned: BEL only" "7" "$(seq_bytes "$(notify_hook "$PERM" TERM_PROGRAM=WezTerm)")"
+"$CCS" notify on >/dev/null 2>&1
+assert_exit "notify test works when installed" "0" env PATH="$NOTIFY_SHIM:$PATH" "$CCS" notify test
 teardown
 
 # -- Notify: refuses invalid settings.json --
@@ -858,6 +982,7 @@ SETTINGS="$TEST_CONFIG_DIR/.claude/settings.json"
 assert_not_contains "purge removes hook references" "claude-provider" "$(cat "$SETTINGS")"
 assert_exit "settings still valid JSON after purge" "0" jq empty "$SETTINGS"
 teardown
+rm -rf "$NOTIFY_SHIM"
 
 # -- Context window: pinned via config --
 printf '\033[1m[context window: config pin]\033[0m\n'
@@ -1822,13 +1947,13 @@ remote_files >/dev/null
 remote_settings=$(cat "$TEST_CONFIG_DIR/verify/settings.json")
 assert_contains "remote settings.json uses the HOME placeholder" "__CCS_HOME__/bin/line" "$remote_settings"
 assert_not_contains "remote settings.json leaks no absolute HOME" "$TEST_CONFIG_DIR/bin" "$remote_settings"
-assert_not_contains "remote settings.json drops the ccs hooks" "notify-stop.sh" "$remote_settings"
+assert_not_contains "remote settings.json drops the ccs hooks" "notify.sh" "$remote_settings"
 assert_exit "remote settings.json is valid JSON" "0" jq empty "$TEST_CONFIG_DIR/verify/settings.json"
 "$CCS" sync pull >/dev/null 2>&1
 local_settings=$(cat "$CLAUDE_HOME/settings.json")
 assert_contains "pull restores the real HOME" "$TEST_CONFIG_DIR/bin/line" "$local_settings"
 assert_not_contains "pull leaves no placeholder behind" "__CCS_HOME__" "$local_settings"
-assert_contains "pull re-attaches the local ccs hooks" "notify-stop.sh" "$local_settings"
+assert_contains "pull re-attaches the local ccs hooks" "notify.sh" "$local_settings"
 teardown
 
 # -- The secret scan blocks a push --
@@ -1954,7 +2079,7 @@ assert_eq "pull hook created" "true" \
 assert_exit "settings.json stays valid JSON" "0" jq empty "$SETTINGS"
 assert_eq "SessionStart is hooked" "1" "$(jq '.hooks.SessionStart | length' "$SETTINGS")"
 assert_eq "SessionEnd is hooked" "1" "$(jq '.hooks.SessionEnd | length' "$SETTINGS")"
-assert_eq "notify's Stop hook is untouched" "1" "$(jq '.hooks.Stop | length' "$SETTINGS")"
+assert_eq "notify's Notification hook is untouched" "1" "$(jq '.hooks.Notification | length' "$SETTINGS")"
 # The hook has to run silently — Claude Code reads hook stdout
 out=$(printf '{}' | "$TEST_CONFIG_DIR/.claude-provider/hooks/sync-push.sh" 2>&1)
 assert_eq "the SessionEnd hook prints nothing" "" "$out"
@@ -1968,7 +2093,7 @@ set_key _sync remote "$SYNC_REMOTE_URL"
 assert_eq "installing twice does not duplicate" "1" "$(jq '.hooks.SessionStart | length' "$SETTINGS")"
 "$CCS" notify off >/dev/null 2>&1
 assert_eq "notify off leaves the sync hooks alone" "1" "$(jq '.hooks.SessionStart | length' "$SETTINGS")"
-assert_eq "notify off still removes its own" "null" "$(jq -r '.hooks.Stop' "$SETTINGS")"
+assert_eq "notify off still removes its own" "null" "$(jq -r '.hooks.Notification' "$SETTINGS")"
 assert_eq "notify off keeps the sync scripts" "true" \
     "$([ -x "$TEST_CONFIG_DIR/.claude-provider/hooks/sync-pull.sh" ] && echo true || echo false)"
 "$CCS" sync hooks off >/dev/null 2>&1
