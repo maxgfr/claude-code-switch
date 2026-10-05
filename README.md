@@ -482,14 +482,14 @@ ccs notify off          # Remove the hook
 
 | Terminal | Who notifies | How |
 |----------|--------------|-----|
-| Ghostty, Kitty, iTerm2 | Claude Code itself | native (the hook stays silent) |
+| Ghostty, Kitty, iTerm2 | Claude Code itself (banner) + ccs (bell) | native banner, bare BEL from the hook |
 | WezTerm, Windows Terminal | ccs | OSC 9 |
 | Warp | ccs | OSC 777 |
 | anything else on macOS (Terminal.app, VS Code…) | ccs | `osascript` |
 | anything else on Linux with a display | ccs | `notify-send` |
 | anything else | ccs | bell only |
 
-Every ccs notification also rings a bare BEL, which most terminals turn into a dock badge or bounce.
+Every ccs notification rings a bare BEL — in Ghostty, Kitty and iTerm2 too, where it is all the hook sends — which most terminals turn into a dock badge or bounce (Ghostty: `bell-features = attention`).
 
 How it works:
 

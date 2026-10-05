@@ -2575,7 +2575,7 @@ settings_detach_hooks() {
 #
 # Claude Code's own channel (preferredNotifChannel, default auto) already posts
 # a desktop notification in Ghostty, Kitty and iTerm2 when you seem to be away,
-# so the hook stays silent there and only fills the gap elsewhere — the setup
+# so the hook only rings the bell there and fills the gap elsewhere — the setup
 # the terminal-config docs recommend for other terminals.
 write_hook_script() {
     local method="$1"
@@ -2633,15 +2633,20 @@ if [ "$method" = "auto" ]; then
     fi
 fi
 
-# Claude Code notifies natively in these: a second banner would be noise.
-# `ccs notify test` sets CCS_NOTIFY_TEST to check the terminal lets one through.
+# Claude Code posts the banner itself in these, so a second one would be
+# noise: the hook only rings the bell (dock badge / bounce). `ccs notify test`
+# sets CCS_NOTIFY_TEST to send the banner too, to check the terminal lets one
+# through.
+native=""
 case "$method" in
-    ghostty|kitty|iterm2) [ -n "${CCS_NOTIFY_TEST:-}" ] || exit 0 ;;
+    ghostty|kitty|iterm2) [ -n "${CCS_NOTIFY_TEST:-}" ] || native=1 ;;
 esac
 
 # terminalSequence must be on Claude Code's allow-list: OSC 9, OSC 99,
 # OSC 777 and a bare BEL (dock badge / bounce) all are.
-case "$method" in
+case "$native$method" in
+    1*)
+        seq="" ;;
     ghostty|warp)
         seq=$(printf '\033]777;notify;%s;%s\007' "$TITLE" "$(printf '%s' "$BODY" | tr ';' ',')") ;;
     iterm2|wezterm|windows-terminal)
@@ -2736,7 +2741,7 @@ notify_on() {
 
     info "Notifications installed (${C_BOLD}${method}${C_RESET})"
     printf '    Only when Claude Code needs you: permission, question, idle prompt, usage limit\n'
-    printf '    Ghostty, Kitty and iTerm2 are notified by Claude Code itself; ccs covers the rest\n'
+    printf '    Ghostty, Kitty and iTerm2: Claude Code posts the banner, ccs rings the bell (dock badge)\n'
     if [ "$method" = "iterm2" ] || [ "${TERM_PROGRAM:-}" = "iTerm.app" ] || [ "${LC_TERMINAL:-}" = "iTerm2" ]; then
         printf '    iTerm2: Settings → Profiles → Terminal → enable "Notification Center Alerts",\n'
         printf '            then Filter Alerts → "Send escape sequence-generated alerts"\n'
@@ -2792,7 +2797,7 @@ notify_test() {
     info "Test notification sent (${method:-unknown})"
     case "$method" in
         ghostty|kitty|iterm2)
-            printf '    Claude Code notifies here itself; this only checks the terminal lets it through\n' ;;
+            printf '    Claude Code posts this banner itself; ccs only rings the bell. This checks the terminal lets both through\n' ;;
         macos)
             printf '    No banner? Allow notifications for Script Editor in System Settings → Notifications\n' ;;
         bell)

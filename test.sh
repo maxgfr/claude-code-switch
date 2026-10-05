@@ -924,7 +924,7 @@ assert_contains "Windows Terminal gets OSC 9" '\u001b]9;' "$out"
 out=$(notify_hook "$PERM" TERM_PROGRAM=WarpTerminal)
 assert_contains "Warp gets OSC 777" '\u001b]777;notify;Claude Code;Allow Bash?' "$out"
 for v in TERM_PROGRAM=ghostty GHOSTTY_RESOURCES_DIR=/x KITTY_WINDOW_ID=1 TERM_PROGRAM=iTerm.app LC_TERMINAL=iTerm2; do
-    assert_eq "native terminal ($v) is left to Claude Code" "" "$(notify_hook "$PERM" "$v")"
+    assert_eq "native terminal ($v): bell only, Claude Code posts the banner" "7" "$(seq_bytes "$(notify_hook "$PERM" "$v")")"
 done
 out=$(notify_hook "$PERM" GHOSTTY_RESOURCES_DIR=/x CCS_NOTIFY_TEST=1)
 assert_contains "test mode: Ghostty gets OSC 777" '\u001b]777;notify' "$out"

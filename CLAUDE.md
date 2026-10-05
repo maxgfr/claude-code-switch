@@ -397,7 +397,7 @@ config.
   sequence — and `;` → `,` for OSC 777, whose fields are `;`-separated
 - Detection (at hook runtime, `auto`) reads variables that survive tmux, where `TERM_PROGRAM` is
   `tmux`: `GHOSTTY_RESOURCES_DIR`, `KITTY_WINDOW_ID`, `LC_TERMINAL=iTerm2`, `WEZTERM_PANE`,
-  `WT_SESSION`. Ghostty/Kitty/iTerm2 → **silent exit** (native); WezTerm, Windows Terminal → OSC 9;
+  `WT_SESSION`. Ghostty/Kitty/iTerm2 → **bare BEL only** (Claude Code posts the banner natively, the bell gives the dock badge); WezTerm, Windows Terminal → OSC 9;
   Warp → OSC 777; else Darwin + `osascript`, Linux + `notify-send` with a display, else BEL. Every
   emitted sequence ends with a bare BEL. All of it is on the `terminalSequence` allow-list —
   WezTerm is OSC 9 there, not 777
