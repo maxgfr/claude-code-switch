@@ -129,7 +129,14 @@ thing. It now checks validity first and says what the user has to clean up by ha
   `rmdir` if empty
 - All providers must expose an **Anthropic Messages API** compatible endpoint — except a
   `native=true` section, which is not an endpoint at all (see Native login above)
-- `anthropic` provider is special: uses `ANTHROPIC_API_KEY`, no `ANTHROPIC_BASE_URL`
+- **The official endpoint is read as no endpoint.** An empty `base_url` selects the Anthropic
+  branch (`ANTHROPIC_API_KEY`, no `ANTHROPIC_BASE_URL`, no window sized), and `get_base_url`
+  returns empty for `https://api.anthropic.com` too, with or without a trailing `/`. Writing the
+  URL out — which the template now does for `[anthropic]` — used to flip an `sk-ant-` key into a
+  Bearer token on the third-party branch. Every read of `base_url` goes through `get_base_url`
+  (`resolve_provider`, `cmd_list`, doctor); everything else follows `ACTIVE_BASE_URL`. Tied to the
+  URL, not the section name, like `native=true`. The template ships `model=opus`, Claude Code's
+  alias for the latest Opus, passed through untouched in `ANTHROPIC_MODEL`
 - Third-party providers use `ANTHROPIC_AUTH_TOKEN` (not `ANTHROPIC_API_KEY`) to avoid the "Detected a custom API key" interactive prompt
 - Section names must be `[a-zA-Z0-9_]` only (no hyphens — invalid in shell variable names)
 - Color variables use `$(printf '\033[...]')` to store real escape bytes (not literal strings)
@@ -484,7 +491,7 @@ config.
   `llm-models --help` — **not** `llm-models latest --help`: Commander answers that with the global
   help and exit 0 on 1.3.1, which made doctor report `ok` against the very version it was meant
   to catch. It lives in `doctor_config` because the config has to be parsed first
-- **No `base_url` means nothing pinned.** `[anthropic] model=auto` sets `ACTIVE_MODEL=""` with no
+- **No `base_url` means nothing pinned.** `[anthropic] model=auto` (opt-in; the template ships `opus`) sets `ACTIVE_MODEL=""` with no
   lookup; `launch_resolved` has `-u ANTHROPIC_MODEL` at the head of the Anthropic `env` list and
   passes `${ACTIVE_MODEL:+"ANTHROPIC_MODEL=$ACTIVE_MODEL"}` (the `${tz:+"TZ=$tz"}` idiom), so the
   variable is absent rather than empty; `cmd_env` prints `unset`. The third-party branch never

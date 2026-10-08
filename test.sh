@@ -271,6 +271,54 @@ assert_contains "native unsets AUTH_TOKEN" "unset ANTHROPIC_AUTH_TOKEN" "$out"
 assert_not_contains "native does not export SMALL_FAST_MODEL" "export ANTHROPIC_SMALL_FAST_MODEL" "$out"
 teardown
 
+# -- The official endpoint written out is still the Anthropic branch --
+# base_url=https://api.anthropic.com must not turn an sk-ant- key into a Bearer
+# token, nor size a window Claude Code ignores for claude-* ids anyway.
+printf '\033[1m[anthropic: official base_url]\033[0m\n'
+setup
+SHIM_DIR=$(mktemp -d)
+printf '#!/bin/sh\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
+chmod +x "$SHIM_DIR/claude"
+set_all_keys "sk-ant-test"
+export FAKE_LLM_MODELS="200000 64000 anthropic/claude-opus"
+export FAKE_LLM_CALLS="$TEST_CONFIG_DIR/llm-calls"
+assert_eq "the template writes the official URL" "https://api.anthropic.com" \
+    "$("$CCS" config get anthropic base_url)"
+for url in "https://api.anthropic.com" "https://api.anthropic.com/"; do
+    set_key anthropic base_url "$url"
+    "$CCS" use anthropic >/dev/null 2>&1
+    out=$("$CCS" env 2>/dev/null)
+    assert_contains "$url: env exports ANTHROPIC_API_KEY" "export ANTHROPIC_API_KEY" "$out"
+    assert_not_contains "$url: no AUTH_TOKEN" "export ANTHROPIC_AUTH_TOKEN" "$out"
+    assert_not_contains "$url: no BASE_URL" "export ANTHROPIC_BASE_URL" "$out"
+    assert_not_contains "$url: no context window" "CLAUDE_CODE_MAX_CONTEXT_TOKENS=" "$out"
+    assert_contains "$url: env exports the alias" "export ANTHROPIC_MODEL='opus'" "$out"
+    out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>/dev/null)
+    assert_contains "$url: launch sends the key" "ANTHROPIC_API_KEY=sk-ant-test" "$out"
+    assert_contains "$url: launch sends model=opus" "ANTHROPIC_MODEL=opus" "$out"
+    assert_not_contains "$url: launch sends no BASE_URL" "ANTHROPIC_BASE_URL" "$out"
+    assert_not_contains "$url: launch sends no AUTH_TOKEN" "ANTHROPIC_AUTH_TOKEN" "$out"
+    assert_not_contains "$url: launch sizes no window" "CLAUDE_CODE_MAX_CONTEXT_TOKENS" "$out"
+done
+assert_not_contains "llm-models is never asked about the endpoint" "--endpoint" \
+    "$(cat "$FAKE_LLM_CALLS" 2>/dev/null)"
+out=$("$CCS" status)
+assert_contains "status reads it as the Anthropic API" "(native Anthropic API)" "$out"
+assert_not_contains "and prints no URL" "https://api.anthropic.com" "$out"
+# Tied to the URL, not the section name
+set_key custom base_url "https://api.anthropic.com"
+set_key custom model claude-sonnet-5
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" with custom 2>/dev/null)
+assert_contains "any section on the official URL uses the API key" "ANTHROPIC_API_KEY=sk-ant-test" "$out"
+assert_not_contains "and no BASE_URL" "ANTHROPIC_BASE_URL" "$out"
+# A lookalike host is a third-party endpoint like any other
+set_key custom base_url "https://api.anthropic.com.example"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" with custom 2>/dev/null)
+assert_contains "a lookalike host stays third-party" "ANTHROPIC_AUTH_TOKEN=sk-ant-test" "$out"
+unset FAKE_LLM_MODELS FAKE_LLM_CALLS
+rm -rf "$SHIM_DIR"
+teardown
+
 # -- Env output survives a single quote in a value --
 printf '\033[1m[env quoting]\033[0m\n'
 setup
@@ -1286,12 +1334,15 @@ assert_exit "a pinned model still works" "0" "$CCS" use zai glm-5.1
 teardown
 
 # -- auto on [anthropic]: nothing pinned, nothing asked --
+# The template ships model=opus now; auto is forced to keep this path covered,
+# on the official URL the template writes out.
 printf '\033[1m[auto model: anthropic pins nothing]\033[0m\n'
 setup
 SHIM_DIR=$(mktemp -d)
 printf '#!/bin/sh\nenv | grep -E "^(ANTHROPIC|CLAUDE_CODE)" || true\n' > "$SHIM_DIR/claude"
 chmod +x "$SHIM_DIR/claude"
 set_all_keys "sk-ant-test"
+set_key anthropic model auto
 export FAKE_LLM_CALLS="$TEST_CONFIG_DIR/llm-calls"
 out=$("$CCS" use anthropic 2>&1)
 assert_contains "use says nothing is pinned" "claude picks its own default" "$out"
@@ -1317,6 +1368,7 @@ teardown
 printf '\033[1m[auto model: status, list and models]\033[0m\n'
 setup
 set_all_keys "test-key-123"
+set_key anthropic model auto
 FAKE_LLM_LATEST=$(latest_answer zai/glm-5.3 zai/glm-5.3-flash zai/glm-5.3-flash 1000000 131072)
 "$CCS" use zai >/dev/null 2>&1
 out=$("$CCS" status)
@@ -1378,7 +1430,10 @@ grep -v '^[[:space:]]*#' "$(dirname "$CCS")/config.template" \
     | grep -v '^[[:space:]]*$' > "$CMP_DIR/template"
 assert_eq "the inline fallback is the template, comments aside" "" \
     "$(diff "$CMP_DIR/inline" "$CMP_DIR/template" || true)"
-for p in anthropic deepseek zai kimi qwen minimax; do
+assert_eq "template: [anthropic] is model=opus" "opus" "$("$CCS" config get anthropic model)"
+assert_eq "template: [anthropic] names the official endpoint" "https://api.anthropic.com" \
+    "$("$CCS" config get anthropic base_url)"
+for p in deepseek zai kimi qwen minimax; do
     assert_eq "template: [$p] is model=auto" "auto" "$("$CCS" config get "$p" model)"
     assert_eq "template: [$p] pins no opus tier" "" "$("$CCS" config get "$p" opus_model)"
     assert_eq "template: [$p] pins no haiku tier" "" "$("$CCS" config get "$p" haiku_model)"

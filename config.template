@@ -66,10 +66,12 @@ prune=true
 [claude]
 native=true
 
+# Anthropic API key (sk-ant-api…). The official URL is sent as ANTHROPIC_API_KEY,
+# never as a Bearer token. "opus" is Claude Code's alias for the latest Opus.
 [anthropic]
-base_url=
+base_url=https://api.anthropic.com
 api_key=
-model=auto
+model=opus
 
 [openrouter]
 base_url=https://openrouter.ai/api

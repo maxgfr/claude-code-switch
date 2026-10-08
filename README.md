@@ -147,7 +147,7 @@ SYNC SUBCOMMANDS
 ```sh
 # Switch provider
 ccs use claude                        # Native login — exactly like running claude
-ccs use anthropic                     # Native endpoint, with your own API key
+ccs use anthropic                     # Anthropic API with your own key — latest Opus (model=opus)
 ccs use anthropic claude-opus-4-6     # Override model
 ccs use openrouter openai/gpt-4o     # OpenRouter with specific model
 ccs use deepseek deepseek-reasoner   # DeepSeek, one model pinned
@@ -187,7 +187,7 @@ All providers expose an Anthropic-compatible Messages API endpoint, confirmed wo
 | Provider     | Base URL                                                  | Default Model                    |
 |--------------|-----------------------------------------------------------|----------------------------------|
 | `claude`     | *(nothing injected — claude's own login)*                 | *(claude's own default)*         |
-| `anthropic`  | *(native endpoint, your API key)*                         | `auto` *(nothing pinned)*        |
+| `anthropic`  | `https://api.anthropic.com` *(your API key)*              | `opus` *(Claude Code's alias)*   |
 | `openrouter` | `https://openrouter.ai/api`                               | `anthropic/claude-sonnet-4`      |
 | `deepseek`   | `https://api.deepseek.com/anthropic`                      | `auto`                           |
 | `zai`        | `https://api.z.ai/api/anthropic`                          | `auto`                           |
@@ -274,9 +274,9 @@ relaunch=off
 native=true
 
 [anthropic]
-base_url=
+base_url=https://api.anthropic.com
 api_key=sk-ant-your-key-here
-model=auto
+model=opus
 
 [openrouter]
 base_url=https://openrouter.ai/api
@@ -297,7 +297,10 @@ opus_model=kimi-k2.5    # an explicit tier still wins over its auto pick
 
 - **`[_defaults]`** — global default provider and model
 - **`api_key=`** — empty means not configured
-- **`base_url=`** — empty for `[anthropic]` uses native Anthropic API (no `ANTHROPIC_BASE_URL`)
+- **`base_url=`** — the provider's endpoint. Empty, or the official `https://api.anthropic.com`
+  (with or without a trailing `/`), means the Anthropic API itself: the key is sent as
+  `ANTHROPIC_API_KEY`, no `ANTHROPIC_BASE_URL` and no context window are exported. Any section
+  pointing there behaves that way; every other URL is a third-party endpoint (`ANTHROPIC_AUTH_TOKEN`)
 - **`native=`** — `true` makes the section the native login: ccs exports nothing and every other key
   in that section is ignored. That is what `[claude]` is
 - **`model=`** — main model (maps to sonnet/default tier in `/models`), or `auto` /

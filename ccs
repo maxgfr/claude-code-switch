@@ -260,6 +260,21 @@ get_cfg() {
     eval printf '%s' "\"\${$(cfg_var "$section" "$key"):-}\""
 }
 
+# A section's endpoint, with the official Anthropic API read as no endpoint at
+# all. An empty base_url is what selects the Anthropic launch branch: the key
+# goes out as ANTHROPIC_API_KEY (x-api-key), not as a Bearer token, and no
+# context window is sized — Claude Code ignores CLAUDE_CODE_MAX_CONTEXT_TOKENS
+# for claude-* ids anyway. Writing the URL out must not silently switch a
+# sk-ant- key to the third-party branch. Tied to the URL, not the section name.
+get_base_url() {
+    local url
+    url=$(get_cfg "$1" "base_url")
+    case "$url" in
+        https://api.anthropic.com | https://api.anthropic.com/) url="" ;;
+    esac
+    printf '%s' "$url"
+}
+
 # --- State file ---
 
 # The state file records the choice made with `ccs use` — provider, model,
@@ -340,10 +355,12 @@ prune=true
 [claude]
 native=true
 
+# Anthropic API key (sk-ant-api…). The official URL is sent as ANTHROPIC_API_KEY,
+# never as a Bearer token. "opus" is Claude Code's alias for the latest Opus.
 [anthropic]
-base_url=
+base_url=https://api.anthropic.com
 api_key=
-model=auto
+model=opus
 
 [openrouter]
 base_url=https://openrouter.ai/api
@@ -477,7 +494,7 @@ resolve_provider() {
     fi
     ACTIVE_NATIVE=""
     ACTIVE_API_KEY=$(get_cfg "$provider" "api_key")
-    ACTIVE_BASE_URL=$(get_cfg "$provider" "base_url")
+    ACTIVE_BASE_URL=$(get_base_url "$provider")
     [ -n "$ACTIVE_API_KEY" ] || return 2
     # Explicit exit: callers run this under `||` / `if`, where set -e is off
     model=$(resolve_model "$provider" "$model_arg") || exit 1
@@ -1013,7 +1030,7 @@ cmd_list() {
         # every provider, and one llm-models call per row is exactly what the
         # launch-path rule forbids.
         if is_auto_model "$dm"; then
-            if [ -z "$(get_cfg "$p" "base_url")" ]; then
+            if [ -z "$(get_base_url "$p")" ]; then
                 dm="$dm (claude's default)"
             elif row=$(cache_lookup "$p" "${dm}#sonnet"); then
                 read -r row row id row <<EOF
@@ -2053,7 +2070,10 @@ ${C_BOLD}NATIVE LOGIN${C_RESET}
     running claude — same subscription, same login — except ccs still wraps it,
     so keep-awake and config sync work on your normal Claude account too.
 
-    [anthropic] is the other thing: native endpoint, but with your own API key.
+    [anthropic] is the other thing: the Anthropic API with your own API key,
+    on model=opus (Claude Code's alias for the latest Opus). Any section whose
+    base_url is https://api.anthropic.com (or empty) sends its key as
+    ANTHROPIC_API_KEY, never as a Bearer token, and sets no context window.
 
     Any config section can be one: put native=true in it, and every other key
     in that section is ignored.
@@ -2325,7 +2345,7 @@ doctor_config() {
     for p in $PROVIDERS; do
         if is_native "$p"; then continue; fi
         [ -n "$(get_cfg "$p" "api_key")" ] || continue
-        [ -n "$(get_cfg "$p" "base_url")" ] || continue
+        [ -n "$(get_base_url "$p")" ] || continue
         m=$(resolve_model "$p" 2>/dev/null) || m=""
         if is_auto_model "$m"; then
             auto_list="${auto_list:+$auto_list }$p"
@@ -2350,7 +2370,7 @@ doctor_config() {
                 label="$ACTIVE_MODEL"
                 # The cached pick only — doctor makes no network call
                 if is_auto_model "$ACTIVE_MODEL"; then
-                    if [ -z "$(get_cfg "$ACTIVE_PROVIDER" "base_url")" ]; then
+                    if [ -z "$(get_base_url "$ACTIVE_PROVIDER")" ]; then
                         label="$ACTIVE_MODEL (nothing pinned — claude picks its own default)"
                     elif auto_load_cached "$ACTIVE_PROVIDER" "$ACTIVE_MODEL"; then
                         label="$ACTIVE_MODEL → $AUTO_SONNET_MODEL ($AUTO_SOURCE)"
