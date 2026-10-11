@@ -63,6 +63,17 @@ llm_latest_calls() {
 BARE_PATH="/usr/bin:/bin"
 trap 'rm -rf "$STUB_DIR"' EXIT
 
+# git housekeeping must never outlive the command that triggered it. A push to
+# the bare remote runs receive.autogc / auto maintenance, detached by default,
+# and that background process was still writing into remote.git while teardown
+# removed it ("Directory not empty", suite red with every assertion green).
+# GIT_CONFIG_GLOBAL, not GIT_CONFIG_COUNT: git scrubs the latter before
+# spawning receive-pack over file://, which is the side that needs it. And not
+# ~/.gitconfig, because HOME changes with every setup.
+printf '[gc]\n\tauto = 0\n\tautoDetach = false\n[maintenance]\n\tauto = false\n\tautoDetach = false\n[receive]\n\tautogc = false\n' \
+    > "$STUB_DIR/gitconfig"
+export GIT_CONFIG_GLOBAL="$STUB_DIR/gitconfig"
+
 # --- Helpers ---
 
 setup() {
