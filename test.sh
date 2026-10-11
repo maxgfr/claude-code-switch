@@ -1185,7 +1185,7 @@ assert_contains "use shows the window of the pick" "1.0M context" "$out"
 assert_contains "active keeps the spec" "MODEL=auto" "$(cat "$TEST_CONFIG_DIR/.claude-provider/active")"
 assert_eq "[_defaults] keeps the spec" "auto" "$("$CCS" config get _defaults model)"
 assert_eq "the section keeps the spec" "auto" "$("$CCS" config get zai model)"
-out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>/dev/null)
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>&1)
 assert_contains "launch announces the pick" "auto → glm-5.3-flash (1.0M context)" "$out"
 assert_contains "main model is the fast variant" "ANTHROPIC_MODEL=glm-5.3-flash" "$out"
 assert_contains "opus tier is the flagship" "ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3" "$out"
@@ -2663,6 +2663,30 @@ assert_eq "a finished run cleans up after itself" "0" \
 assert_eq "the directory is private" "700" \
     "$(stat -c '%a' "$TMPD" 2>/dev/null || stat -f '%A' "$TMPD")"
 rm -rf "$RL_SHIM"
+teardown
+
+# -- On a launch, stdout is claude's alone --
+printf '\033[1m[regression: launch banner on stderr]\033[0m\n'
+TEST_CONFIG_DIR=$(mktemp -d)
+export HOME="$TEST_CONFIG_DIR"
+OUT_SHIM=$(mktemp -d)
+printf '#!/bin/sh\necho "{\\"result\\":\\"ok\\"}"\n' > "$OUT_SHIM/claude"
+chmod +x "$OUT_SHIM/claude"
+ERRF="$OUT_SHIM/stderr"
+# First command on a fresh HOME: "Created config" must not reach stdout either
+out=$(PATH="$OUT_SHIM:$PATH" "$CCS" -p --output-format json "say ok" 2>"$ERRF")
+assert_eq "a native launch prints only claude on stdout" '{"result":"ok"}' "$out"
+assert_contains "the banner is on stderr" "Launching claude" "$(cat "$ERRF")"
+assert_contains "and so is the config creation" "Created config" "$(cat "$ERRF")"
+set_all_keys "test-key-123"
+"$CCS" use zai >/dev/null 2>&1
+for form in "-p" "launch -p" "with deepseek -p" "--relaunch -p"; do
+    # shellcheck disable=SC2086  # intentional: each form is several words
+    out=$(PATH="$OUT_SHIM:$PATH" "$CCS" $form "say ok" 2>"$ERRF")
+    assert_eq "ccs $form: stdout is claude's alone" '{"result":"ok"}' "$out"
+    assert_contains "ccs $form: the banner is on stderr" "Launching claude with" "$(cat "$ERRF")"
+done
+rm -rf "$OUT_SHIM"
 teardown
 
 # -- Summary --

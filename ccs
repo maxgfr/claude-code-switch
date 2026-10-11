@@ -113,6 +113,12 @@ info() {
     printf '%s>>>%s %s\n' "${C_GREEN}" "${C_RESET}" "$*"
 }
 
+# info() on stderr, for everything said on the way to claude: stdout belongs to
+# claude there, and `ccs -p --output-format json … | jq` must read only claude.
+note() {
+    printf '%s>>>%s %s\n' "${C_GREEN}" "${C_RESET}" "$*" >&2
+}
+
 # Single-quote a string for `eval`: every ' becomes '\'' — builtins only
 sh_quote() {
     local s="$1" out=""
@@ -406,8 +412,9 @@ model=
 TMPL
         fi
         chmod 600 "$CONFIG_FILE"
-        info "Created config at $CONFIG_FILE"
-        printf '    Edit it to add your API keys: %sccs config%s\n' "${C_BOLD}" "${C_RESET}"
+        # stderr: this runs before every command, launches and `ccs env` included
+        note "Created config at $CONFIG_FILE"
+        printf '    Edit it to add your API keys: %sccs config%s\n' "${C_BOLD}" "${C_RESET}" >&2
     fi
 
     # Configs written before native mode have no native provider at all, so
@@ -1696,9 +1703,9 @@ relaunch_loop() {
         [ -z "$mdate" ] || when="$mdate at $clock"
         [ -z "$tz" ] || when="$when ($tz)"
         if [ "$target" -le "$now" ]; then
-            info "Usage limit hit, and ${C_BOLD}${when}${C_RESET} has already passed — relaunching now."
+            note "Usage limit hit, and ${C_BOLD}${when}${C_RESET} has already passed — relaunching now."
         else
-            info "Usage limit hit — relaunching at ${C_BOLD}${when}${C_RESET}, in $(fmt_duration $((target - now))). Ctrl-C to give up."
+            note "Usage limit hit — relaunching at ${C_BOLD}${when}${C_RESET}, in $(fmt_duration $((target - now))). Ctrl-C to give up."
             if [ -z "$CAFFEINE_CMD" ]; then
                 warn "caffeine is off — if the machine sleeps before then, so does the wait (try --caffeine)"
             fi
@@ -1729,7 +1736,7 @@ relaunch_loop() {
                 fi
             done
         fi
-        info "Limit reset — relaunching ${C_BOLD}claude --continue${C_RESET}"
+        note "Limit reset — relaunching ${C_BOLD}claude --continue${C_RESET}"
     done
 }
 
@@ -1824,9 +1831,9 @@ launch_resolved() {
     # keeping the machine awake is about the machine, not about the provider.
     if [ -n "$ACTIVE_NATIVE" ]; then
         if [ -n "$CAFFEINE_CMD" ]; then
-            info "Launching claude ${C_DIM}(native login, caffeinated)${C_RESET}"
+            note "Launching claude ${C_DIM}(native login, caffeinated)${C_RESET}"
         else
-            info "Launching claude ${C_DIM}(native login)${C_RESET}"
+            note "Launching claude ${C_DIM}(native login)${C_RESET}"
         fi
         # shellcheck disable=SC2086  # intentional: fixed words, empty means "no wrapper"
         launch_run env $CCS_SCRUB $CAFFEINE_CMD claude "$@"
@@ -1842,9 +1849,9 @@ launch_resolved() {
         detail="${detail:+$detail, }caffeinated"
     fi
     if [ -n "$detail" ]; then
-        info "Launching claude with ${C_BOLD}${ACTIVE_PROVIDER}${C_RESET} / ${C_CYAN}$(model_label short)${C_RESET} ${C_DIM}(${detail})${C_RESET}"
+        note "Launching claude with ${C_BOLD}${ACTIVE_PROVIDER}${C_RESET} / ${C_CYAN}$(model_label short)${C_RESET} ${C_DIM}(${detail})${C_RESET}"
     else
-        info "Launching claude with ${C_BOLD}${ACTIVE_PROVIDER}${C_RESET} / ${C_CYAN}$(model_label short)${C_RESET}"
+        note "Launching claude with ${C_BOLD}${ACTIVE_PROVIDER}${C_RESET} / ${C_CYAN}$(model_label short)${C_RESET}"
     fi
 
     # `env -u` scrubs conflicting vars inherited from the shell (e.g. a

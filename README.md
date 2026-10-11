@@ -169,6 +169,7 @@ ccs                                   # Launch with active provider
 ccs --print "hello world"             # Pass flags through to claude
 ccs --caffeine -p "long refactor"     # ...and don't let the machine sleep
 ccs --relaunch --caffeine -p "…"      # ...and pick up again when the usage limit resets
+ccs -p --output-format json "…" | jq  # stdout is claude's alone — ccs's own lines go to stderr
 
 # One launch with another provider — the default stays what it was
 ccs with deepseek -p "review this"    # DeepSeek for this run only

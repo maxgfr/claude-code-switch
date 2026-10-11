@@ -101,6 +101,11 @@ thing. It now checks validity first and says what the user has to clean up by ha
   `eval "$(ccs env)"` for another provider silently won: ccs announced "launching vanilla claude"
   while the session went to that provider's endpoint, on that provider's token. One list also
   removes the drift risk between two copies of eleven variable names
+- **On a launch, stdout belongs to claude.** Everything ccs says on the way there — the
+  "Launching claude …" banner, the relaunch lines, "Created config" (which runs before every
+  command, `ccs env` included) — goes through `note()`, `info()` on stderr. The banner used to land
+  on stdout and broke `ccs -p --output-format json … | jq`. `info()` itself stays on stdout: for
+  `use`, `config set`, `sync` and the rest, that output is the command's answer
 - `ccs -h|--help|-v|--version` are intercepted in `main()` BEFORE the generic `-*` claude passthrough — everything else starting with `-` goes to claude
 - Unconfigured launch (no active provider + no default api_key) falls back to vanilla `claude` with a warning instead of dying (`launch_vanilla()`)
 - `load_state()` is the single place that resolves active state or `[_defaults]`; `cmd_launch`,
