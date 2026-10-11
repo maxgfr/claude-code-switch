@@ -198,6 +198,9 @@ All providers expose an Anthropic-compatible Messages API endpoint, confirmed wo
 | `doubao`     | `https://ark.cn-beijing.volces.com/api/coding`            | `doubao-seed-code-preview-latest`|
 | `custom`     | *(user-defined)*                                          | *(user-defined)*                 |
 
+`anthropic` bills your API key per token, `-p` included — Claude Code prefers `ANTHROPIC_API_KEY`
+over your login whenever it is set. To run on your Claude subscription, use `claude`.
+
 `auto` means [llm-models](https://github.com/maxgfr/llm-models) picks the newest models for that
 endpoint at launch — the flagship for the opus tier, its fast variant for the main model — see
 [Automatic model choice](#automatic-model-choice-modelauto). OpenRouter and Doubao stay pinned:
@@ -223,7 +226,8 @@ It is stricter than plain `claude` on one point: the `ANTHROPIC_*` and `CLAUDE_C
 `ccs` manages are scrubbed from the environment first, so a stale `eval "$(ccs env)"` for another
 provider cannot quietly survive into the session.
 
-Don't confuse it with `anthropic`, which is the Anthropic endpoint **with your own API key**.
+Don't confuse it with `anthropic`, which is the Anthropic endpoint **with your own API key**, billed
+per token rather than on your subscription — `ccs use anthropic` says so when you switch.
 
 Any section can be a native login — `native=true` makes every other key in it irrelevant:
 

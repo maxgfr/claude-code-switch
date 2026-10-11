@@ -219,6 +219,33 @@ active=$(cat "$TEST_CONFIG_DIR/.claude-provider/active")
 assert_contains "model override works" "MODEL=glm-4.7" "$active"
 teardown
 
+# -- Use: [anthropic] says it bills the key, not the subscription --
+printf '\033[1m[use anthropic: billing note]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+out=$("$CCS" use anthropic 2>&1)
+assert_contains "anthropic names per-token billing" "Billed per token on your API key" "$out"
+assert_contains "and points at the subscription" "ccs use claude" "$out"
+out=$("$CCS" use zai 2>&1)
+assert_not_contains "a third-party provider has no billing note" "Billed per token" "$out"
+out=$("$CCS" use claude 2>&1)
+assert_not_contains "the native login has no billing note" "Billed per token" "$out"
+teardown
+
+# -- Use: a claude flag in the model slot is refused --
+# `ccs use anthropic -p` used to persist MODEL=-p and send it at every launch.
+printf '\033[1m[use: flag as model]\033[0m\n'
+setup
+set_all_keys "test-key-123"
+"$CCS" use zai >/dev/null 2>&1
+before=$(cat "$TEST_CONFIG_DIR/.claude-provider/active")
+assert_exit "use anthropic -p fails" "1" "$CCS" use anthropic -p
+assert_eq "active is left untouched" "$before" "$(cat "$TEST_CONFIG_DIR/.claude-provider/active")"
+err=$("$CCS" use anthropic --print 2>&1 || true)
+assert_contains "the error names the one-off form" "ccs with anthropic --print" "$err"
+assert_exit "a flag is refused for the native login too" "1" "$CCS" use claude -p
+teardown
+
 # -- Use unknown provider fails --
 printf '\033[1m[use unknown provider]\033[0m\n'
 setup

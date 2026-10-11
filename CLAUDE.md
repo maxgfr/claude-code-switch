@@ -142,6 +142,11 @@ thing. It now checks validity first and says what the user has to clean up by ha
   (`resolve_provider`, `cmd_list`, doctor); everything else follows `ACTIVE_BASE_URL`. Tied to the
   URL, not the section name, like `native=true`. The template ships `model=opus`, Claude Code's
   alias for the latest Opus, passed through untouched in `ANTHROPIC_MODEL`
+- **`[anthropic]` is API billing, `[claude]` is the subscription.** Claude Code prefers
+  `ANTHROPIC_API_KEY` over the login whenever it is set, `-p` included, so people who picked
+  `anthropic` for their subscription were billed per token. `cmd_use` prints a dim line saying so
+  whenever `ACTIVE_BASE_URL` is empty (the same test `launch_resolved` uses), and dies on a model
+  argument starting with `-`: `ccs use anthropic -p` used to persist `MODEL=-p`
 - Third-party providers use `ANTHROPIC_AUTH_TOKEN` (not `ANTHROPIC_API_KEY`) to avoid the "Detected a custom API key" interactive prompt
 - Section names must be `[a-zA-Z0-9_]` only (no hyphens — invalid in shell variable names)
 - Color variables use `$(printf '\033[...]')` to store real escape bytes (not literal strings)
