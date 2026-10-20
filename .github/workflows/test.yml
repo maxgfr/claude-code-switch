@@ -20,7 +20,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # SC3043 (`local` in POSIX sh) is a documented convention — see CLAUDE.md
+      # SC3043 (`local` in POSIX sh) is a documented convention — see AGENTS.md
       - name: Shellcheck
         if: runner.os == 'Linux'
         run: shellcheck -s sh -e SC3043 ccs test.sh
