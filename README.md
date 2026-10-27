@@ -751,6 +751,11 @@ job state, none of which helps you reinstall:
 | `settings.json` | `history.jsonl`, `shell-snapshots/`, `file-history/` |
 | `agents/`, `commands/`, `skills/`, `output-styles/`, `hooks/` | `.credentials.json`, `~/.claude.json` |
 | `plugins/installed_plugins.json`, `plugins/known_marketplaces.json` | `settings.local.json`, every cache |
+| | `skills/synced/` and `skills/.trash/` — Claude Code's own, synced from claude.ai |
+
+`skills/synced/` is downloaded again by Claude Code on every machine signed in to the account, so it
+is never pushed; a mirror pull leaves the local copy (and the trash) in place rather than deleting
+it with the rest of `skills/`.
 
 Three things happen on the way out, so the config actually works when it lands:
 

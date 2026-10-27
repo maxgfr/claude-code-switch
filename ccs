@@ -84,6 +84,11 @@ SYNC_TIMEOUT=5                                # seconds the auto sync may steal 
 # transcripts/, history.jsonl, file-history/, shell-snapshots/, telemetry/,
 # .credentials.json, settings.local.json and ~/.claude.json included.
 SYNC_PATHS="CLAUDE.md settings.json agents commands skills output-styles hooks plugins/installed_plugins.json plugins/known_marketplaces.json"
+# Inside the allow-list but Claude Code's own: the skills it syncs from
+# claude.ai (downloaded again on every machine, removed when disabled there)
+# and the trash it moves them to. Never pushed, never taken from a remote, and
+# a mirror restore leaves the local ones where they are.
+SYNC_SKIP="skills/synced skills/.trash"
 
 # --- Colors (only when stdout is a terminal) ---
 if [ -t 1 ]; then
@@ -3899,12 +3904,15 @@ sync_scan_secrets() {
 # Returns 1 when ~/.claude holds nothing worth backing up — the caller decides
 # whether that is an error (push) or just something to report (status).
 sync_stage() {
-    local paths
+    local paths p
     paths=$(sync_existing_paths "$CLAUDE_DIR")
     [ -n "$paths" ] || return 1
     sync_wipe_worktree
     # shellcheck disable=SC2086  # deliberate: $paths is a whitespace-separated list
     sync_copy_tree "$CLAUDE_DIR" "$SYNC_DIR" $paths
+    for p in $SYNC_SKIP; do
+        rm -rf "${SYNC_DIR:?}/${p}"
+    done
     sync_strip_ccs_hooks "${SYNC_DIR}/settings.json"
     if [ "${SYNC_INCLUDE_CCS:-}" = "true" ]; then
         mkdir -p "${SYNC_DIR}/ccs"
@@ -4027,8 +4035,18 @@ sync_backup_claude() {
 
 # sync_apply <tree> <prune> — the only function that writes into ~/.claude
 sync_apply() {
-    local tree="$1" prune="$2" p
+    local tree="$1" prune="$2" p keep
     mkdir -p "$CLAUDE_DIR"
+    # $SYNC_SKIP: a remote written by an older ccs may still carry them, and a
+    # mirror restore would otherwise delete the local ones with their parent
+    keep=$(mktemp -d)
+    for p in $SYNC_SKIP; do
+        rm -rf "${tree:?}/${p}"
+        if [ "$prune" = "true" ] && [ -e "${CLAUDE_DIR}/${p}" ]; then
+            mkdir -p "$(dirname "${keep}/${p}")"
+            mv "${CLAUDE_DIR}/${p}" "${keep}/${p}"
+        fi
+    done
     for p in $SYNC_PATHS; do
         if [ -e "${tree}/${p}" ]; then
             if [ "$prune" = "true" ]; then
@@ -4047,6 +4065,13 @@ sync_apply() {
             rm -rf "${CLAUDE_DIR:?}/${p}"
         fi
     done
+    for p in $SYNC_SKIP; do
+        if [ -e "${keep}/${p}" ]; then
+            mkdir -p "$(dirname "${CLAUDE_DIR}/${p}")"
+            mv "${keep}/${p}" "${CLAUDE_DIR}/${p}"
+        fi
+    done
+    rm -rf "$keep"
     return 0
 }
 

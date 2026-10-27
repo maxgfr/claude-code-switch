@@ -1034,7 +1034,9 @@ assert_not_contains "list: nothing partial any more" "partial" "$out"
 assert_contains "status of one pack names each item" "permissions.deny has Read(**/.env)" "$("$CCS" pack status guard)"
 assert_contains "doctor lists them" "packs on: privacy no-trace guard quiet autonomous" "$("$CCS" doctor 2>&1 || true)"
 assert_not_contains "and no longer warns about bypassPermissions" "without the guard pack" "$("$CCS" doctor 2>&1 || true)"
-assert_exit "doctor finds the hook scripts" "0" "$CCS" doctor
+# Not doctor's exit status: CI runners have no claude on PATH, which is a fail of its own
+assert_contains "doctor finds the hook scripts" "2 ccs hook(s) in settings.json, scripts present" \
+    "$("$CCS" doctor 2>&1 || true)"
 "$CCS" pack on all >/dev/null 2>&1
 assert_eq "on twice: still one guard hook" "3" "$(jq '.hooks.PreToolUse | length' "$SETTINGS")"
 "$CCS" pack off all >/dev/null 2>&1
@@ -2267,6 +2269,38 @@ printf 'keep me\n' > "$CLAUDE_HOME/skills/kept/SKILL.md"
 "$CCS" sync pull --additive >/dev/null 2>&1
 assert_eq "additive keeps local-only files" "keep me" \
     "$(cat "$CLAUDE_HOME/skills/kept/SKILL.md" 2>/dev/null)"
+teardown
+
+# -- Claude Code's own skill folders stay local --
+printf '\033[1m[sync: claude.ai-synced skills and the trash stay local]\033[0m\n'
+sync_setup
+make_claude_home
+mkdir -p "$CLAUDE_HOME/skills/synced/pdf" "$CLAUDE_HOME/skills/.trash/old"
+printf 'from claude.ai\n' > "$CLAUDE_HOME/skills/synced/pdf/SKILL.md"
+printf 'deleted\n' > "$CLAUDE_HOME/skills/.trash/old/SKILL.md"
+sync_init_repo
+"$CCS" sync push >/dev/null 2>&1
+files=$(remote_files)
+assert_contains "the user's own skill is pushed" "./skills/demo/SKILL.md" "$files"
+assert_not_contains "claude.ai-synced skills are not" "skills/synced" "$files"
+assert_not_contains "nor the trash" "skills/.trash" "$files"
+"$CCS" sync pull >/dev/null 2>&1
+assert_eq "a mirror pull leaves the synced skills in place" "from claude.ai" \
+    "$(cat "$CLAUDE_HOME/skills/synced/pdf/SKILL.md" 2>/dev/null)"
+assert_eq "and the trash" "deleted" "$(cat "$CLAUDE_HOME/skills/.trash/old/SKILL.md" 2>/dev/null)"
+assert_eq "and still restores the rest" "name: demo" "$(cat "$CLAUDE_HOME/skills/demo/SKILL.md")"
+"$CCS" pack on guard no-trace >/dev/null 2>&1
+"$CCS" sync push >/dev/null 2>&1
+remote_files >/dev/null
+assert_not_contains "pack hook paths never reach the remote" "pack-guard.sh" \
+    "$(cat "$TEST_CONFIG_DIR/verify/settings.json")"
+"$CCS" sync pull >/dev/null 2>&1
+assert_eq "a pull puts the pack hooks back" "2" \
+    "$(jq '[.hooks.PreToolUse[]? | select(.hooks[0].command | test("pack-(guard|no-trace).sh$"))] | length' "$CLAUDE_HOME/settings.json")"
+assert_eq "with their matchers" "Bash" \
+    "$(jq -r '.hooks.PreToolUse[] | select(.hooks[0].command | endswith("pack-guard.sh")) | .matcher' "$CLAUDE_HOME/settings.json")"
+assert_eq "and the deny rules travel with settings.json" "true" \
+    "$(jq '.permissions.deny | index("Read(~/.ssh/**)") != null' "$CLAUDE_HOME/settings.json")"
 teardown
 
 # -- A gist stores a flattened tree, and restores it nested --

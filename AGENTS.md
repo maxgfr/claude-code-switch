@@ -323,6 +323,11 @@ config.
 - `SYNC_PATHS` at the top of `ccs` is the **allow-list** of what leaves `~/.claude`. It is an
   allow-list on purpose: a real `~/.claude` is gigabytes of `projects/`, `jobs/` and
   `file-history/`. Never invert it into a deny-list
+- `SYNC_SKIP` carves Claude Code's own folders out of it: `skills/synced` (claude.ai skills,
+  re-downloaded per machine) and `skills/.trash`. `sync_stage` drops them from the staging tree;
+  `sync_apply` drops them from the incoming tree (an older ccs may have pushed them) and, on a
+  mirror restore, moves the local ones aside before `rm -rf skills` and back afterwards. Without
+  that a pull deleted them, and a push published ~10 MB of someone else's skills
 - One engine for both backends, because **a gist is a git repository**. `kind=gist` stores a
   flattened tree (`/` → `%2F`, `%` → `%25`, encode `%` first / decode it last) because GitHub's
   gist UI hides subdirectories; `kind=repo` stores the real tree. `.ccs-sync` records the kind so
