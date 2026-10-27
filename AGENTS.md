@@ -1,6 +1,6 @@
 # AGENTS.md
 
-**When changing commands, options, or behavior: always update AGENTS.md, README.md, and `cmd_help()` in `ccs` together. Run `./test.sh` to verify.**
+**When changing commands, options, or behavior: always update AGENTS.md, README.md, `cmd_help()` in `ccs` and the agent skill `skills/claude-code-switch/SKILL.md` together. Run `./test.sh` to verify.**
 
 ## Project overview
 
@@ -159,6 +159,8 @@ thing. It now checks validity first and says what the user has to clean up by ha
 ccs                 # Main script — all logic here
 config.template     # Default config with all providers
 test.sh             # Integration test suite (run in CI, hermetic: stubs llm-models)
+skills/claude-code-switch/SKILL.md
+                    # Agent skill, installed with `npx skills add maxgfr/claude-code-switch`
 .releaserc          # semantic-release config
 .version-hook.sh    # Injects version into ccs during release
 .github/workflows/  # test.yml — one CI workflow: test.sh + shellcheck (ubuntu + macos),
@@ -588,6 +590,22 @@ config.
    diffs them, comments aside)
 3. Update README.md providers table
 4. The provider **must** support the Anthropic Messages API format
+
+## Agent skill (`skills/claude-code-switch/`)
+
+- Layout `skills/<name>/SKILL.md`, the one `npx skills add` discovers (same as maxgfr/scopelet).
+  `npx skills add . --list` from the repo root lists it without installing anything
+- **It does not restate the command list.** `ccs help` matches the installed version; a copy in
+  the skill would drift. The skill holds what an agent cannot infer from the help: commands that
+  block its own session (bare `ccs` / `launch` / `with` without `-p`, `ccs config` alone), key
+  handling (stdin or the user's own terminal, never argv), the subscription vs API-billing trap,
+  which commands need the user's go-ahead, and how to respond to a `guard` / `no-trace` refusal
+- `test.sh` `[agent skill]` checks the frontmatter (name = directory, description ≤ 1024
+  chars, the Agent Skills limit), that the skill names every state-changing command and every
+  pack in `$PACK_NAMES` (read from `ccs`, so a new pack fails until the skill covers it), and
+  that what it tells agents to rely on holds (a key piped on stdin is stored, `status` masks it)
+- Not shipped by the Homebrew formula and not versioned by `.version-hook.sh`: `npx skills
+  update` follows the folder's content hash
 
 ## Release process
 

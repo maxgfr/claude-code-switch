@@ -2970,6 +2970,32 @@ done
 rm -rf "$OUT_SHIM"
 teardown
 
+# -- Agent skill (npx skills add maxgfr/claude-code-switch) --
+printf '\033[1m[agent skill]\033[0m\n'
+SKILL="$(dirname "$CCS")/skills/claude-code-switch/SKILL.md"
+assert_eq "skill file exists" "true" "$([ -f "$SKILL" ] && echo true || echo false)"
+assert_eq "frontmatter name matches its directory" "claude-code-switch" \
+    "$(sed -n 's/^name: //p' "$SKILL" | head -n 1)"
+desc=$(sed -n 's/^description: //p' "$SKILL" | head -n 1)
+assert_eq "description present and within the 1024-char limit" "true" \
+    "$([ -n "$desc" ] && [ "${#desc}" -le 1024 ] && echo true || echo false)"
+# The commands an agent changes things with, and every pack ccs ships — read
+# from ccs itself, so a new pack the skill does not mention fails here
+for c in use with config pack sync notify caffeine relaunch doctor status reset purge \
+         $(sed -n 's/^PACK_NAMES="\(.*\)"$/\1/p' "$CCS"); do
+    assert_eq "the skill covers '$c'" "true" "$(grep -qw -- "$c" "$SKILL" && echo true || echo false)"
+done
+# What the skill tells an agent to rely on must actually behave that way
+setup
+printf '%s' "sk-test-from-stdin" | "$CCS" config set zai api_key >/dev/null 2>&1
+assert_eq "a key piped on stdin is stored, as the skill says" "sk-test-from-stdin" "$("$CCS" config get zai api_key)"
+"$CCS" use zai >/dev/null 2>&1
+out=$("$CCS" status 2>&1)
+assert_contains "ccs status shows the key of the active provider…" "API Key" "$out"
+assert_not_contains "…masked" "sk-test-from-stdin" "$out"
+# import's --yes off a terminal is covered by [sync: import], against a real remote
+teardown
+
 # -- Summary --
 TOTAL=$((PASS + FAIL))
 printf '\n\033[1m=== Results: %d/%d passed ===\033[0m\n' "$PASS" "$TOTAL"

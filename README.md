@@ -53,6 +53,25 @@ add [`llm-models`](https://github.com/maxgfr/llm-models) for context-window sizi
 `ccs sync` additionally needs `git` (and `gh`, only to create a gist or repo for you). Everything
 else works without them.
 
+### Agent skill
+
+So that Claude Code, Codex, Cursor, OpenCode and the other agents can drive `ccs` for you —
+switch a provider, apply a pack, set up sync, diagnose the install:
+
+```sh
+npx skills add maxgfr/claude-code-switch --skill claude-code-switch --global
+```
+
+Pick the agents in the prompt, or name them with `-a claude-code codex …` and `-y`. Update it
+with `npx skills update claude-code-switch --global -y`.
+
+The skill is [`skills/claude-code-switch/SKILL.md`](skills/claude-code-switch/SKILL.md). It
+leaves the command list to `ccs help`, which always matches the installed version, and carries
+what an agent cannot guess: which commands would block its own session (an interactive claude,
+`$EDITOR`), how to handle an API key without leaking it, which commands publish or overwrite and
+need the user's go-ahead (`sync init|push|pull|import`, `purge`, `autonomous`), and what to do
+when `guard` or `no-trace` refuses a command. It does not install `ccs` itself — Homebrew does.
+
 ## Quick start
 
 Out of the box `ccs` is the native login: it launches `claude` untouched, on whatever account
