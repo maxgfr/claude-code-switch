@@ -2033,6 +2033,9 @@ ${C_BOLD}COMMANDS${C_RESET}
     notify on [terminal]        Desktop notifications when Claude needs you
     notify off|status|test      terminal: auto (default), ghostty, iterm2,
                                 kitty, wezterm, warp, macos, bell
+    pack [list]                 Reversible settings packs, and which are on
+    pack on|off <pack>... | all privacy, no-trace, guard, quiet, autonomous
+    pack status <pack>          Each setting of a pack, ok or not
     caffeine on|off|status      Keep the machine awake while claude runs
     relaunch on|off|status      Wait out the usage limit, then claude --continue
     sync <subcommand>           Back up ~/.claude to a gist or repo (see below)
@@ -2076,6 +2079,8 @@ ${C_BOLD}EXAMPLES${C_RESET}
     ccs models                         Show the context window per model tier
     ccs notify on                      Notify when Claude needs you (needs jq)
     ccs notify on iterm2               Pin the terminal instead of auto-detect
+    ccs pack on privacy no-trace guard Private, no attribution, secrets guarded
+    ccs pack on all                    Every pack (needs jq)
     ccs caffeine on                    No sleep while claude runs, from now on
     ccs --caffeine -p "long task"      No sleep for this one session
     ccs relaunch on                    Hit the limit? Wait for the reset, continue
@@ -2157,6 +2162,31 @@ ${C_BOLD}RELAUNCH${C_RESET}
     a real tty; on a pipe through tee. The recording is a temp file, gone as
     soon as the session ends. Without script(1), ccs warns and runs claude as
     usual. Ctrl-C during the wait gives up. 'ccs env' cannot carry it.
+
+${C_BOLD}PACKS${C_RESET}
+    A pack is a named set of documented settings that ccs writes into
+    ~/.claude/settings.json and takes back exactly. The previous values are
+    recorded first; 'ccs pack off' restores them, except those you changed
+    since. Needs jq.
+
+        privacy     no telemetry, error reports, /bug, feedback survey or
+                    drafts; no Remote Control, session mirroring or mobile
+                    push. The auto-updater stays on: security fixes first
+        no-trace    no Co-Authored-By, "Generated with Claude Code" or session
+                    link, and a hook refusing any commit, PR, issue or
+                    release text that still carries one
+        guard       Read/Edit deny ~/.ssh, ~/.aws, ~/.gnupg, tokens and .env;
+                    a Bash hook refuses secret reads, force pushes (not
+                    --force-with-lease), rm -r on / or ~, curl | sh and
+                    unsigned commits. Holds in bypassPermissions too
+        quiet       no spinner tips, prompt or plugin suggestions
+        autonomous  continue after the usage limit, a question left 10 min
+                    goes on without you; turns guard on, which then cannot be
+                    turned off before it
+
+    Your prompts and code still reach Anthropic — that is how the model
+    answers. Whether they train Claude is an account setting:
+        ${PRIVACY_TRAINING_URL}
 
 ${C_BOLD}CONFIG SYNC${C_RESET}
     'ccs sync' backs up what makes a good Claude Code install — global
@@ -2462,6 +2492,33 @@ EOF
     fi
 }
 
+doctor_packs() {
+    local n state ok total on=""
+    command -v jq >/dev/null 2>&1 || return 0
+    if [ -f "$CLAUDE_SETTINGS" ] && ! jq empty "$CLAUDE_SETTINGS" 2>/dev/null; then
+        return 0
+    fi
+    for n in $PACK_NAMES; do
+        read -r state ok total <<EOF
+$(pack_summary "$n")
+EOF
+        if [ "$state" = "on" ]; then
+            on="$on $n"
+        elif pack_is_on "$n"; then
+            doctor_warn "pack $n: $((total - ok)) of $total item(s) changed since — ccs pack status $n, then ccs pack on $n"
+        fi
+    done
+    if [ -n "$on" ]; then
+        doctor_ok "packs on:$on"
+    else
+        doctor_ok "no pack on — ccs pack list"
+    fi
+    if [ "$(pack_settings | jq -r '.permissions.defaultMode // empty')" = "bypassPermissions" ] \
+        && [ "$(pack_summary guard | cut -d' ' -f1)" != "on" ]; then
+        doctor_warn "bypassPermissions without the guard pack — secrets and force pushes are one tool call away (ccs pack on guard)"
+    fi
+}
+
 doctor_sync() {
     load_sync_cfg
     if [ -z "$SYNC_REMOTE" ]; then
@@ -2499,6 +2556,7 @@ cmd_doctor() {
     doctor_perm "$ACTIVE_FILE" 600
     doctor_config
     doctor_settings
+    doctor_packs
     doctor_sync
     printf '\n'
     if [ "$DOCTOR_FAILED" = "1" ]; then
@@ -2530,8 +2588,14 @@ cmd_purge() {
             warn "$CLAUDE_SETTINGS is not valid JSON — remove the ccs hooks from it manually"
         else
             notify_off
-            settings_detach_hooks "$CCS_HOOK_MARKER" SessionStart SessionEnd
+            settings_detach_hooks "$CCS_HOOK_MARKER" SessionStart SessionEnd PreToolUse
         fi
+    fi
+    # Pack settings point at nothing ccs owns, so they keep working without it —
+    # purge leaves them rather than quietly turning telemetry back on. Their
+    # hooks do point into ~/.claude-provider, and go with it (detached above).
+    if [ -f "$PACKS_STATE_FILE" ]; then
+        info "Pack settings kept in $CLAUDE_SETTINGS (their hooks removed) — 'ccs pack off all' before purge reverts them"
     fi
     rm -rf "$CONFIG_DIR"
     info "Purged $CONFIG_DIR — all ccs data removed"
@@ -2576,16 +2640,17 @@ settings_set_key() {
     mv "$tmpfile" "$CLAUDE_SETTINGS"
 }
 
-# settings_attach_hook <event> <script> — idempotent: an entry for this exact
-# script is replaced, never duplicated; every other entry is preserved.
+# settings_attach_hook <event> <script> [matcher] — idempotent: an entry for
+# this exact script is replaced, never duplicated; every other entry is preserved.
 settings_attach_hook() {
-    local event="$1" script="$2" tmpfile
+    local event="$1" script="$2" matcher="${3:-}" tmpfile
     tmpfile=$(mktemp)
-    jq --arg ev "$event" --arg cmd "$script" '
+    jq --arg ev "$event" --arg cmd "$script" --arg m "$matcher" '
         .hooks = (.hooks // {})
         | .hooks[$ev] = ([(.hooks[$ev] // [])[]
             | select([.hooks[]?.command // "" | . == $cmd] | any | not)]
-            + [{"hooks":[{"type":"command","command":$cmd}]}])
+            + [(if $m == "" then {} else {matcher: $m} end)
+               + {"hooks":[{"type":"command","command":$cmd}]}])
     ' "$CLAUDE_SETTINGS" > "$tmpfile"
     mv "$tmpfile" "$CLAUDE_SETTINGS"
 }
@@ -2859,6 +2924,603 @@ cmd_notify() {
     esac
 }
 
+# --- Packs ---
+# `ccs pack on <name>` applies a named, reversible set of changes to
+# ~/.claude/settings.json; `ccs pack off <name>` takes back exactly those.
+# Same contract as notify: explicit opt-in, through settings_prepare. Every
+# value is recorded before it changes, and `off` gives back only those still
+# reading what ccs wrote — a value changed since is the user's.
+#
+# A pack is data in $PACKS, read by jq:
+#   set   [path, value] pairs, written with setpath
+#   add   [path, [items]] — items appended to the array at path; `off` removes
+#         only the ones ccs added, never one the user already had
+#   hook  a PreToolUse matcher: ccs generates ~/.claude-provider/hooks/pack-<name>.sh
+#   needs packs turned on first, and refused off while this one is on
+# No path may appear in two packs: `off` of one would undo the other.
+
+PACKS_STATE_FILE="${CONFIG_DIR}/packs-state.json"
+PACK_NAMES="privacy no-trace guard quiet autonomous"
+PRIVACY_TRAINING_URL="https://claude.ai/settings/data-privacy-controls"
+# Deliberately not CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC in privacy: it also
+# turns off the auto-updater, and missing security fixes is not privacy.
+PACKS='{
+  "privacy": {
+    "about": "Nothing reaches Anthropic beyond the conversation itself",
+    "set": [
+      [["env", "DISABLE_TELEMETRY"], "1"],
+      [["env", "DISABLE_ERROR_REPORTING"], "1"],
+      [["env", "DISABLE_BUG_COMMAND"], "1"],
+      [["env", "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"], "1"],
+      [["feedbackSurveyRate"], 0],
+      [["feedbackDrafts"], "off"],
+      [["autoUploadSessions"], false],
+      [["disableRemoteControl"], true],
+      [["remoteControlAtStartup"], false],
+      [["inputNeededNotifEnabled"], false],
+      [["agentPushNotifEnabled"], false]
+    ]
+  },
+  "no-trace": {
+    "about": "Nothing published names Claude Code: commits, PRs, issues, releases",
+    "set": [
+      [["attribution", "commit"], ""],
+      [["attribution", "pr"], ""],
+      [["attribution", "sessionUrl"], false],
+      [["includeCoAuthoredBy"], false]
+    ],
+    "hook": "Bash|mcp__.*"
+  },
+  "guard": {
+    "about": "Secrets, force pushes and wipes out of reach, even in bypassPermissions",
+    "add": [
+      [["permissions", "deny"], [
+        "Read(~/.ssh/**)", "Edit(~/.ssh/**)",
+        "Read(~/.aws/**)", "Edit(~/.aws/**)",
+        "Read(~/.gnupg/**)", "Edit(~/.gnupg/**)",
+        "Read(~/.config/gh/**)", "Read(~/.config/gcloud/**)",
+        "Read(~/.kube/**)", "Read(~/.docker/config.json)",
+        "Read(~/.netrc)", "Read(~/.npmrc)", "Read(~/.pypirc)",
+        "Read(~/.claude/.credentials.json)",
+        "Read(**/.env)", "Read(**/.env.*)"
+      ]]
+    ],
+    "hook": "Bash"
+  },
+  "quiet": {
+    "about": "No tips, prompt suggestions or plugin suggestions",
+    "set": [
+      [["spinnerTipsEnabled"], false],
+      [["promptSuggestionEnabled"], false],
+      [["enabledPlugins", "cc-plugin-you-should-know@builtin"], false]
+    ]
+  },
+  "autonomous": {
+    "about": "Long unattended runs: resume after the usage limit, never stall",
+    "needs": ["guard"],
+    "set": [
+      [["autoContinueAtUsageLimit"], true],
+      [["autoCompactEnabled"], true],
+      [["switchModelsOnFlag"], true],
+      [["askUserQuestionTimeout"], "10m"],
+      [["fileCheckpointingEnabled"], true]
+    ]
+  }
+}'
+
+pack_require_name() {
+    case " $PACK_NAMES " in
+        *" $1 "*) ;;
+        *) die "Unknown pack '$1'. Packs: $PACK_NAMES (or all)" ;;
+    esac
+}
+
+# The current settings, or {} when there are none yet
+pack_settings() {
+    if [ -f "$CLAUDE_SETTINGS" ]; then cat "$CLAUDE_SETTINGS"; else printf '{}'; fi
+}
+
+pack_state() {
+    if [ -f "$PACKS_STATE_FILE" ]; then cat "$PACKS_STATE_FILE"; else printf '{}'; fi
+}
+
+pack_is_on() {
+    [ "$(pack_state | jq -r --arg n "$1" 'has($n)')" = "true" ]
+}
+
+pack_hook_script() {
+    printf '%s/pack-%s.sh' "$HOOKS_DIR" "$1"
+}
+
+pack_matcher() {
+    printf '%s' "$PACKS" | jq -r --arg n "$1" '.[$n].hook // empty'
+}
+
+# "<ok|no> <what> <current>", one line per item of the pack
+pack_report() {
+    local name="$1" matcher script attached
+    pack_settings | jq -r --argjson pk "$(printf '%s' "$PACKS" | jq --arg n "$name" '.[$n]')" '
+        (($pk.set // [])[] as [$p, $v] | getpath($p) as $c
+            | "\(if $c == $v then "ok" else "no" end) \($p | join(".")) = \($c | tojson)"),
+        (($pk.add // [])[] as [$p, $items] | (getpath($p) // []) as $cur | $items[] as $i
+            | "\(if ($cur | type) == "array" and ($cur | any(.[]; . == $i)) then "ok" else "no" end) \($p | join(".")) has \($i)")
+    '
+    matcher=$(pack_matcher "$name")
+    [ -n "$matcher" ] || return 0
+    script=$(pack_hook_script "$name")
+    attached=$(pack_settings | jq -r --arg c "$script" \
+        '[.hooks.PreToolUse[]? | .hooks[]? | .command // ""] | any(. == $c)')
+    if [ "$attached" = "true" ] && [ -x "$script" ]; then
+        printf 'ok hooks.PreToolUse(%s) runs %s\n' "$matcher" "$(tilde "$script")"
+    else
+        printf 'no hooks.PreToolUse(%s) runs %s\n' "$matcher" "$(tilde "$script")"
+    fi
+}
+
+# on|partial|off <ok> <total>
+pack_summary() {
+    local report n total
+    report=$(pack_report "$1")
+    total=$(printf '%s\n' "$report" | grep -c . || true)
+    n=$(printf '%s\n' "$report" | grep -c '^ok ' || true)
+    if [ "$n" = "$total" ]; then printf 'on %s %s\n' "$n" "$total"
+    elif [ "$n" = "0" ]; then printf 'off %s %s\n' "$n" "$total"
+    else printf 'partial %s %s\n' "$n" "$total"
+    fi
+}
+
+pack_write_settings() {
+    local tmpfile
+    tmpfile=$(mktemp)
+    jq "$@" "$CLAUDE_SETTINGS" > "$tmpfile"
+    mv "$tmpfile" "$CLAUDE_SETTINGS"
+}
+
+pack_write_state() {
+    local tmpfile
+    tmpfile=$(mktemp)
+    pack_state | jq "$@" > "$tmpfile"
+    if [ "$(jq 'length' "$tmpfile")" = "0" ]; then
+        rm -f "$tmpfile" "$PACKS_STATE_FILE"
+    else
+        mv "$tmpfile" "$PACKS_STATE_FILE"
+    fi
+}
+
+pack_on_one() {
+    local name="$1" pk dep matcher
+    pk=$(printf '%s' "$PACKS" | jq --arg n "$name" '.[$n]')
+    for dep in $(printf '%s' "$pk" | jq -r '(.needs // [])[]'); do
+        if ! pack_is_on "$dep"; then
+            pack_on_one "$dep"
+            printf '    %s needs %s, so it is on too\n' "$name" "$dep"
+        fi
+    done
+    # Only the first `on` records: a second one would remember ccs's own
+    # values as the user's.
+    if ! pack_is_on "$name"; then
+        # shellcheck disable=SC2016  # jq programs, not shell
+        pack_write_state --arg n "$name" --argjson e "$(jq --argjson pk "$pk" '
+            def present($p): try (getpath($p[:-1]) | has($p[-1])) catch false;
+            {set: [($pk.set // [])[] as [$p, $v]
+                    | {path: $p, value: $v, had: present($p), prev: getpath($p)}],
+             add: [($pk.add // [])[] as [$p, $items] | (getpath($p) // []) as $cur
+                    | {path: $p, items: [$items[] | select(. as $i | $cur | any(.[]; . == $i) | not)]}]}
+        ' "$CLAUDE_SETTINGS")" '.[$n] = $e'
+    fi
+    # shellcheck disable=SC2016  # a jq program, not shell
+    pack_write_settings --argjson pk "$pk" '
+        reduce ($pk.set // [])[] as [$p, $v] (.; setpath($p; $v))
+        | reduce ($pk.add // [])[] as [$p, $items] (.;
+            (getpath($p) // []) as $cur
+            | setpath($p; $cur + [$items[] | select(. as $i | $cur | any(.[]; . == $i) | not)]))
+    '
+    matcher=$(pack_matcher "$name")
+    if [ -n "$matcher" ]; then
+        write_pack_hook "$name"
+        settings_attach_hook PreToolUse "$(pack_hook_script "$name")" "$matcher"
+    fi
+    info "Pack ${C_BOLD}${name}${C_RESET} on — $(printf '%s' "$pk" | jq -r '.about')"
+    case "$name" in
+        privacy)
+            printf '    Off: telemetry, error reports, /bug, the feedback survey and drafts\n'
+            printf '    Off: Remote Control, session mirroring to claude.ai, mobile push notifications\n'
+            printf '    Your prompts and code still reach Anthropic — that is how the model answers\n'
+            printf '    Not a local setting — stop your chats training Claude: %s\n' "$PRIVACY_TRAINING_URL" ;;
+        no-trace)
+            printf '    No Co-Authored-By, no "Generated with Claude Code", no session links\n'
+            printf '    And a hook refuses any commit, PR, issue or release text that still carries one\n' ;;
+        guard)
+            printf '    Read/Edit refuse ~/.ssh, ~/.aws, ~/.gnupg, cloud and registry tokens, .env files\n'
+            printf '    A Bash hook refuses secret reads, force pushes, wipes, curl | sh and unsigned commits\n'
+            printf '    It works in bypassPermissions too: deny rules and hooks apply in every mode\n' ;;
+        autonomous)
+            printf '    Waits out the usage limit and continues; a question left 10 min goes on without you\n'
+            printf '    Overnight? Add %sccs caffeine on%s so the machine stays awake\n' "${C_BOLD}" "${C_RESET}" ;;
+    esac
+}
+
+pack_off_one() {
+    local name="$1" other script
+    for other in $PACK_NAMES; do
+        [ "$other" != "$name" ] || continue
+        if pack_is_on "$other" \
+            && printf '%s' "$PACKS" | jq -e --arg o "$other" --arg n "$name" \
+                '(.[$o].needs // []) | index($n)' >/dev/null; then
+            die "$other relies on $name — run 'ccs pack off $other' first"
+        fi
+    done
+    script=$(pack_hook_script "$name")
+    if ! pack_is_on "$name" && [ ! -f "$script" ]; then
+        info "Pack ${C_BOLD}${name}${C_RESET} is not on — nothing to revert"
+        return 0
+    fi
+    if [ -f "$CLAUDE_SETTINGS" ]; then
+        settings_prepare
+        if pack_is_on "$name"; then
+            # shellcheck disable=SC2016  # a jq program, not shell
+            pack_write_settings --argjson e "$(pack_state | jq --arg n "$name" '.[$n]')" '
+                def prune($p):
+                    if ($p | length) == 0 then .
+                    elif getpath($p) == {} or getpath($p) == [] then delpaths([$p]) | prune($p[:-1])
+                    else . end;
+                reduce $e.set[] as $s (.;
+                    if getpath($s.path) != $s.value then .
+                    elif $s.had then setpath($s.path; $s.prev)
+                    else delpaths([$s.path]) | prune($s.path[:-1]) end)
+                | reduce $e.add[] as $a (.;
+                    if (getpath($a.path) | type) == "array" then
+                        setpath($a.path; [getpath($a.path)[]
+                            | select(. as $x | $a.items | any(.[]; . == $x) | not)])
+                        | prune($a.path)
+                    else . end)
+            '
+        fi
+        settings_detach_hooks "$script" PreToolUse
+    fi
+    rm -f "$script"
+    rmdir "$HOOKS_DIR" 2>/dev/null || true
+    # shellcheck disable=SC2016  # a jq program, not shell
+    pack_write_state --arg n "$name" 'del(.[$n])'
+    info "Pack ${C_BOLD}${name}${C_RESET} off — values you changed since were left alone"
+}
+
+# Every name is checked before anything is written. In the main shell, not in
+# the $(pack_expand) that follows: a die in there would only end the subshell.
+pack_validate() {
+    local n
+    [ $# -gt 0 ] || die "Usage: ccs pack on|off <pack>... (packs: $PACK_NAMES, or all)"
+    for n in "$@"; do
+        [ "$n" = "all" ] || pack_require_name "$n"
+    done
+}
+
+# pack_expand forward|reverse <name|all>... -> names in dependency order
+pack_expand() {
+    local order="$1" n out=""
+    shift
+    for n in $PACK_NAMES; do
+        case " $* " in *" $n "*|*" all "*) out="$out $n" ;; esac
+    done
+    # shellcheck disable=SC2086  # one name per word
+    if [ "$order" = "reverse" ]; then
+        printf '%s\n' $out | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }'
+    else
+        printf '%s\n' $out
+    fi
+}
+
+pack_on() {
+    local n
+    pack_validate "$@"
+    require_jq
+    settings_prepare
+    for n in $(pack_expand forward "$@"); do
+        pack_on_one "$n"
+    done
+    printf '    Applies to claude sessions started from now — check: %sccs pack status%s\n' \
+        "${C_BOLD}" "${C_RESET}"
+}
+
+pack_off() {
+    local n
+    pack_validate "$@"
+    require_jq
+    for n in $(pack_expand reverse "$@"); do
+        pack_off_one "$n"
+    done
+}
+
+pack_list() {
+    local n state ok total about
+    require_jq
+    if [ -f "$CLAUDE_SETTINGS" ] && ! jq empty "$CLAUDE_SETTINGS" 2>/dev/null; then
+        die "$CLAUDE_SETTINGS is not valid JSON — Claude Code ignores ALL of it until fixed"
+    fi
+    printf '\n'
+    for n in $PACK_NAMES; do
+        read -r state ok total <<EOF
+$(pack_summary "$n")
+EOF
+        about=$(printf '%s' "$PACKS" | jq -r --arg n "$n" '.[$n].about')
+        case "$state" in
+            on)      printf '  %s%-8s%s' "${C_GREEN}" "on" "${C_RESET}" ;;
+            partial) printf '  %s%-8s%s' "${C_YELLOW}" "partial" "${C_RESET}" ;;
+            *)       printf '  %-8s' "off" ;;
+        esac
+        printf '%s%-11s%s %s (%s/%s)\n' "${C_BOLD}" "$n" "${C_RESET}" "$about" "$ok" "$total"
+    done
+    printf '\n    Details: %sccs pack status <pack>%s — apply: %sccs pack on <pack>...%s (or all)\n\n' \
+        "${C_BOLD}" "${C_RESET}" "${C_BOLD}" "${C_RESET}"
+}
+
+pack_status() {
+    local name="$1" state ok total mark what
+    pack_require_name "$name"
+    require_jq
+    if [ -f "$CLAUDE_SETTINGS" ] && ! jq empty "$CLAUDE_SETTINGS" 2>/dev/null; then
+        die "$CLAUDE_SETTINGS is not valid JSON — Claude Code ignores ALL of it until fixed"
+    fi
+    read -r state ok total <<EOF
+$(pack_summary "$name")
+EOF
+    printf '  %s%s:%s %s (%s/%s)\n' "${C_BOLD}" "$name" "${C_RESET}" "$state" "$ok" "$total"
+    while read -r mark what; do
+        if [ "$mark" = "ok" ]; then
+            printf '    %sok%s  %s\n' "${C_GREEN}" "${C_RESET}" "$what"
+        else
+            printf '    %s--%s  %s\n' "${C_YELLOW}" "${C_RESET}" "$what"
+        fi
+    done <<EOF
+$(pack_report "$name")
+EOF
+    if [ "$state" != "on" ]; then
+        printf '    Apply: %sccs pack on %s%s\n' "${C_BOLD}" "$name" "${C_RESET}"
+    fi
+    if [ "$name" = "privacy" ]; then
+        printf '    Not a local setting — model training on your chats: %s\n' "$PRIVACY_TRAINING_URL"
+    fi
+}
+
+# Put pack hooks back after a sync restore, like notify and sync hooks
+pack_reattach_hooks() {
+    local n script matcher
+    for n in $PACK_NAMES; do
+        script=$(pack_hook_script "$n")
+        matcher=$(pack_matcher "$n")
+        if [ -n "$matcher" ] && [ -x "$script" ]; then
+            settings_attach_hook PreToolUse "$script" "$matcher"
+        fi
+    done
+}
+
+cmd_pack() {
+    local sub="${1:-list}"
+    if [ $# -gt 0 ]; then shift; fi
+    case "$sub" in
+        list)   pack_list ;;
+        on)     pack_on "$@" ;;
+        off)    pack_off "$@" ;;
+        status)
+            if [ $# -eq 0 ]; then pack_list; else pack_status "$1"; fi ;;
+        *)      die "Unknown pack subcommand '$sub'. Usage: ccs pack [list|on|off|status] [pack...]" ;;
+    esac
+}
+
+# The hooks. Both are POSIX sh, read the tool call from stdin, and exit 2 with
+# the reason on stderr to refuse it — which Claude Code honours in every
+# permission mode, bypassPermissions included. Neither needs jq at runtime: a
+# missing jq falls back to the raw JSON, which still carries the command.
+write_pack_hook() {
+    local name="$1" script
+    script=$(pack_hook_script "$name")
+    mkdir -p "$HOOKS_DIR"
+    {
+        printf '#!/bin/sh\n'
+        printf '# Generated by ccs (claude-code-switch) — do not edit, re-run: ccs pack on %s\n' "$name"
+        cat <<'HOOK'
+set -u
+input=$(cat)
+field() {
+    printf '%s' "$input" | jq -r "$1 // empty" 2>/dev/null || printf '%s' "$input"
+}
+tool=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null \
+    || printf '%s' "$input" | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+HOOK
+        case "$name" in
+            guard)    write_guard_hook ;;
+            no-trace) write_no_trace_hook ;;
+        esac
+    } > "$script"
+    chmod +x "$script"
+}
+
+write_guard_hook() {
+    cat <<'HOOK'
+[ "$tool" = "Bash" ] || exit 0
+
+# A heredoc body is text — a commit message, a file being written — unless a
+# shell reads it, so it is dropped before anything is judged. Otherwise a
+# message that merely mentions "curl | sh" was refused as if it ran it.
+strip_heredocs() {
+    awk '
+        skip { t = $0; if (dash) sub(/^\t+/, "", t); if (t == delim) skip = 0; next }
+        {
+            print
+            if (match($0, /<<-?[[:space:]]*["\047]?[A-Za-z_][A-Za-z0-9_]*["\047]?/) \
+                && substr($0, RSTART - 1, 1) != "<") {
+                h = substr($0, RSTART, RLENGTH)
+                dash = (h ~ /^<<-/)
+                gsub(/^<<-?[[:space:]]*|["\047]/, "", h)
+                pre = substr($0, 1, RSTART - 1)
+                if (pre !~ /(^|[;&|(`[:space:]])(sudo[[:space:]]+)?(ba|z|da|k)?sh[[:space:]]*$/) {
+                    delim = h; skip = 1
+                }
+            }
+        }'
+}
+raw=$(field '.tool_input.command')
+# No awk is no reason to judge nothing: fall back to the whole command
+cmd=$(printf '%s\n' "$raw" | strip_heredocs) || cmd=$raw
+
+block() {
+    printf 'ccs guard: blocked — %s. If it is really needed, ask the user to run it themselves.\n' "$1" >&2
+    exit 2
+}
+
+# Where a program name starts a command: line start, a separator, $( or a
+# backtick, or sh -c "…". Not after a word, so a message quoting one is text.
+AT_CMD="(^|[;&|(\`]|-c[[:space:]]+[\"'])[[:space:]]*(sudo[[:space:]]+)?"
+
+# Credential stores, wherever the command names them
+if printf '%s' "$cmd" | grep -Eq '(^|[^A-Za-z0-9_.-])\.(ssh|aws|gnupg|kube)(/|[[:space:]]|$)|\.docker/config\.json|\.config/(gh|gcloud)/|\.(netrc|npmrc|pypirc)([^A-Za-z0-9_-]|$)|\.claude/\.credentials\.json'; then
+    block "it touches a credential store (~/.ssh, ~/.aws, ~/.gnupg, a registry or cloud token)"
+fi
+if printf '%s' "$cmd" | grep -Eq "${AT_CMD}security[[:space:]]+(find-(generic|internet)-password|dump-keychain|export)"; then
+    block "it reads the macOS keychain"
+fi
+if printf '%s' "$cmd" | grep -Eq "${AT_CMD}(curl|wget)[[:space:]][^|]*\\|[[:space:]]*(sudo[[:space:]]+)?(ba|z|da|k)?sh([^A-Za-z0-9_.-]|\$)"; then
+    block "it pipes a download straight into a shell"
+fi
+if printf '%s' "$cmd" | grep -Eq -- '--no-gpg-sign|(commit|tag)\.gpg[sS]ign[[:space:]=]+(false|0|no|off)'; then
+    block "it turns commit signing off"
+fi
+
+# rm -r on the root, the home directory or a system directory
+check_rm() {
+    local rec="" a
+    for a; do
+        case "$a" in
+            --recursive) rec=1 ;;
+            --*) ;;
+            -*[rR]*) rec=1 ;;
+        esac
+    done
+    [ -n "$rec" ] || return 0
+    for a; do
+        # shellcheck disable=SC2088,SC2016  # a literal ~ or $HOME, as the command spells it
+        case "$a" in
+            /|'/*'|'~'|'~/'|'~/*'|'$HOME'|'$HOME/'|'$HOME/*'|'${HOME}'|'${HOME}/'|'${HOME}/*'|"$HOME"|"$HOME/"|"$HOME/*"|..|../|/Users|/Users/|/home|/home/|/System|/Library|/Applications|/usr|/etc|/var|/bin|/sbin|/opt)
+                block "rm -r $a would wipe it" ;;
+        esac
+    done
+}
+
+# git push that rewrites the remote: --force, -f, --mirror, +refspec.
+# --force-with-lease and --force-if-includes are the safe forms, and allowed.
+check_git() {
+    local a
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -C|-c) shift; [ $# -gt 0 ] && shift ;;
+            -*) shift ;;
+            *) break ;;
+        esac
+    done
+    [ "${1:-}" = "push" ] || return 0
+    shift
+    for a; do
+        case "$a" in
+            --force-with-lease|--force-with-lease=*|--force-if-includes) ;;
+            --force|--mirror) block "git push $a rewrites the remote (use --force-with-lease)" ;;
+            --*) ;;
+            -*f*) block "git push $a rewrites the remote (use --force-with-lease)" ;;
+            +*) block "the refspec $a force-pushes (use --force-with-lease)" ;;
+        esac
+    done
+}
+
+# Reading a .env file prints its secrets into the conversation. Templates
+# are fine, and so is a redirect target (cat .env.example > .env).
+check_env_read() {
+    local a skip=""
+    for a; do
+        if [ -n "$skip" ]; then skip=""; continue; fi
+        case "$a" in
+            '>'|'>>'|'1>'|'2>'|'&>') skip=1; continue ;;
+            '>'*|*'>'*) continue ;;
+        esac
+        case "${a##*/}" in
+            .env.example|.env.sample|.env.template|.env.dist|.env.defaults) ;;
+            .env|.env.*) block "it prints $a into the conversation" ;;
+        esac
+    done
+}
+
+set -f
+# One segment per simple command: every separator becomes a newline
+# shellcheck disable=SC2020
+while IFS= read -r seg; do
+    # shellcheck disable=SC2086  # word splitting is the point, globbing is off
+    set -- $seg
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            sudo|command|exec|time|nohup|xargs|*=*) shift ;;
+            *) break ;;
+        esac
+    done
+    [ $# -gt 0 ] || continue
+    prog=${1##*/}
+    shift
+    case "$prog" in
+        rm) check_rm "$@" ;;
+        git) check_git "$@" ;;
+        env|printenv)
+            [ $# -gt 0 ] || block "$prog prints every environment variable, tokens included" ;;
+        cat|less|more|head|tail|bat|nl|strings|xxd|od|hexdump|base64|grep|egrep|rg|awk|sed|cut|sort|uniq|jq|diff)
+            check_env_read "$@" ;;
+    esac
+done <<EOF
+$(printf '%s\n' "$cmd" | tr -d "\"'" | tr ';&|()`' '\n\n\n\n\n\n')
+EOF
+exit 0
+HOOK
+}
+
+write_no_trace_hook() {
+    cat <<'HOOK'
+# What an attribution looks like, in any of the forms Claude Code writes
+PATTERN='Co-Authored-By:[[:space:]]*Claude|noreply@anthropic\.com|Generated with \[?Claude|claude\.com/claude-code|claude\.ai/code|Claude-Session:'
+
+case "$tool" in
+    Bash)
+        cmd=$(field '.tool_input.command')
+        # Only what publishes: commit, tag and notes messages, and gh/glab
+        printf '%s' "$cmd" | grep -Eq '(^|[^A-Za-z0-9_-])(git[[:space:]].*(commit|tag|notes|merge)([[:space:]]|$)|(gh|glab)[[:space:]]+(pr|issue|release|api|gist|repo|discussion|mr))' \
+            || exit 0
+        text=$cmd
+        # ... and the files those messages are read from (-F, --file, --body-file)
+        set -f
+        # shellcheck disable=SC2046  # word splitting is the point, globbing is off
+        set -- $(printf '%s' "$cmd" | tr -d "\"'")
+        while [ $# -gt 0 ]; do
+            f=""
+            case "$1" in
+                -F|--file|--body-file|--notes-file) shift; f="${1:-}" ;;
+                --file=*|--body-file=*|--notes-file=*) f="${1#*=}" ;;
+            esac
+            if [ -n "$f" ] && [ -f "$f" ]; then
+                text="$text
+$(head -c 200000 "$f")"
+            fi
+            [ $# -gt 0 ] && shift
+        done
+        ;;
+    mcp__*)
+        text=$(printf '%s' "$input" | jq -c '.tool_input' 2>/dev/null || printf '%s' "$input") ;;
+    *)
+        exit 0 ;;
+esac
+
+match=$(printf '%s' "$text" | grep -Eio "$PATTERN" | head -n 1)
+if [ -n "$match" ]; then
+    printf 'ccs no-trace: blocked — "%s" would publish a Claude Code attribution. Remove it and try again: nothing this user publishes names Claude Code.\n' "$match" >&2
+    exit 2
+fi
+exit 0
+HOOK
+}
+
 # --- Sync ---
 # `ccs sync` backs up the part of ~/.claude that lets you rebuild a good install
 # — global CLAUDE.md, settings, agents, commands, skills, output styles, hooks,
@@ -3128,6 +3790,7 @@ sync_reattach_ccs_hooks() {
         settings_attach_hook SessionStart "${HOOKS_DIR}/sync-pull.sh"
         settings_attach_hook SessionEnd "${HOOKS_DIR}/sync-push.sh"
     fi
+    pack_reattach_hooks
     return 0
 }
 
@@ -4001,7 +4664,7 @@ cmd_version() {
 # command word, so `ccs --caffeine with <TAB>` works.
 # Every word main() dispatches on, aliases included — a test derives this list
 # from main()'s own case labels and fails when the two drift apart.
-CCS_COMMANDS="use list ls status st config cfg launch run with env models notify caffeine relaunch sync doctor reset purge help version completion"
+CCS_COMMANDS="use list ls status st config cfg launch run with env models notify pack caffeine relaunch sync doctor reset purge help version completion"
 CCS_LAUNCH_FLAGS="--caffeine --caffeine=display --no-caffeine --relaunch --no-relaunch"
 CCS_SECTION_SED='s/^[[:space:]]*\[\([A-Za-z0-9][A-Za-z0-9_]*\)\][[:space:]]*$/\1/p'
 
@@ -4037,6 +4700,11 @@ _ccs() {
             esac ;;
         models)     COMPREPLY=(\$(compgen -W "refresh clear" -- "\$cur")) ;;
         notify)     COMPREPLY=(\$(compgen -W "on off status test" -- "\$cur")) ;;
+        pack)
+            case "\$prev" in
+                pack) COMPREPLY=(\$(compgen -W "list on off status" -- "\$cur")) ;;
+                *)    COMPREPLY=(\$(compgen -W "${PACK_NAMES} all" -- "\$cur")) ;;
+            esac ;;
         caffeine)
             case "\$prev" in
                 caffeine) COMPREPLY=(\$(compgen -W "on off status" -- "\$cur")) ;;
@@ -4076,6 +4744,7 @@ _ccs() {
         'env:Print export statements for the current shell'
         'models:Show the context windows ccs will use'
         'notify:Desktop notifications when Claude needs you'
+        'pack:Reversible settings packs: privacy, no-trace, guard, quiet, autonomous'
         'caffeine:Keep the machine awake while claude runs'
         'relaunch:Wait out the usage limit, then claude --continue'
         'sync:Back up ~/.claude to a gist or repo'
@@ -4113,6 +4782,11 @@ _ccs() {
             esac ;;
         models)     _values 'action' refresh clear ;;
         notify)     _values 'action' on off status test ;;
+        pack)
+            case "\${words[CURRENT-1]}" in
+                pack) _values 'action' list on off status ;;
+                *)    _values 'pack' ${PACK_NAMES} all ;;
+            esac ;;
         caffeine)
             case "\${words[CURRENT-1]}" in
                 caffeine) _values 'action' on off status ;;
@@ -4214,6 +4888,9 @@ main() {
             ;;
         notify)
             cmd_notify "$@"
+            ;;
+        pack)
+            cmd_pack "$@"
             ;;
         caffeine)
             cmd_caffeine "$@"

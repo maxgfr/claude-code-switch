@@ -15,9 +15,10 @@ Inspired by [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-c
   variant per tier for that endpoint, so a new generation needs no config edit
 - **Right-sized context window**: detects each model's real window so auto-compact stops assuming 200k
 - **Config backup & sync**: push `~/.claude` to a gist or private repo, restore it on any machine
+- **Settings packs**: `ccs pack on privacy no-trace guard` — no telemetry, no Claude attribution in anything you publish, secrets and force pushes out of reach in `bypassPermissions`; `ccs pack off` puts back exactly what was there
 - **Keep awake**: `ccs caffeine on` stops the machine sleeping mid-session, for exactly as long as claude runs
 - **Tiny footprint**: pure POSIX sh — no python, no node; `jq`, `llm-models`, `git` and `gh` are all optional, and each feature degrades instead of breaking when one is missing
-- **Zero interference**: switching provider never touches your shell, your dotfiles or your Claude Code config. Only `ccs notify` and `ccs sync` write to `~/.claude` — both explicit opt-in, both reversible, both backed up first
+- **Zero interference**: switching provider never touches your shell, your dotfiles or your Claude Code config. Only `ccs notify`, `ccs pack` and `ccs sync` write to `~/.claude` — all explicit opt-in, all reversible, all backed up first
 - **Direct launch**: `ccs` starts Claude Code with the right env vars (scoped to that process)
 - **Shell integration** (optional): `eval "$(ccs env)"` exports vars to your current session
 - **API key validation**: clear errors when a provider is not configured
@@ -114,6 +115,9 @@ COMMANDS
     env                         Print export statements for current shell
     models [refresh|clear]      Show / refresh the context windows ccs will use
     notify on|off|status|test   Desktop notifications when Claude needs you
+    pack [list]                 Reversible settings packs, and which are on
+    pack on|off <pack>... | all privacy, no-trace, guard, quiet, autonomous
+    pack status <pack>          Each setting of a pack, ok or not
     caffeine on|off|status      Keep the machine awake while claude runs
     relaunch on|off|status      Wait out the usage limit, then claude --continue
     sync <subcommand>           Back up ~/.claude to a gist or repo
@@ -467,7 +471,7 @@ auto_context=false          # disable the lookup entirely
   `[claude-code:unrecognized_model] {"model":"glm-5.3",...}`. That one is only silenced by mapping
   the id in the `modelOverrides` setting — which would make Claude Code resolve your model to an
   Anthropic one and *ignore the window you just set*. `ccs` deliberately does not do that, and does
-  not write to `~/.claude/settings.json` outside `ccs notify`.
+  not write to `~/.claude/settings.json` outside `ccs notify`, `ccs pack` and `ccs sync`.
 - A model missing from the catalogue (Doubao/Volcengine, for instance) simply gets no window, and
   `ccs` behaves as it did before. Pin it with `context_tokens=`.
 
@@ -522,7 +526,115 @@ Tips:
 - If you set `preferredNotifChannel` to `notifications_disabled`, Ghostty, Kitty and iTerm2 stay
   silent — `ccs notify on` warns, and leaves it as you set it.
 
-> **Note:** `ccs notify on` is one of the two exceptions to the zero-interference principle (the other is `ccs sync`): it adds one `Notification` hook to `~/.claude/settings.json`. It is explicit opt-in, backs up your settings to `~/.claude-provider/settings-backup.json`, and `ccs notify off` removes the hook. The script lives in `~/.claude-provider/hooks/`. Upgrading from an older ccs, which forced `preferredNotifChannel` off and added a `Stop` hook, undoes both on the next `notify on` or `notify off`.
+> **Note:** `ccs notify on` is one of the three exceptions to the zero-interference principle (the others are `ccs pack` and `ccs sync`): it adds one `Notification` hook to `~/.claude/settings.json`. It is explicit opt-in, backs up your settings to `~/.claude-provider/settings-backup.json`, and `ccs notify off` removes the hook. The script lives in `~/.claude-provider/hooks/`. Upgrading from an older ccs, which forced `preferredNotifChannel` off and added a `Stop` hook, undoes both on the next `notify on` or `notify off`.
+
+## Packs
+
+A pack is a named set of documented Claude Code settings that ccs writes into
+`~/.claude/settings.json` — and takes back exactly.
+
+```sh
+ccs pack                       # Every pack: on, off or partial, with a one-line summary
+ccs pack on privacy no-trace   # Turn some on (several at once is fine)
+ccs pack on all                # Or every one
+ccs pack status guard          # Each item of one pack, ok or not
+ccs pack off guard             # Put back what was there before
+```
+
+**Requires [jq](https://jqlang.org)**, like `ccs notify`.
+
+| Pack | What it does |
+|------|--------------|
+| `privacy` | Nothing reaches Anthropic beyond the conversation itself |
+| `no-trace` | Nothing you publish names Claude Code |
+| `guard` | Secrets, force pushes and wipes out of reach — in `bypassPermissions` too |
+| `quiet` | No tips, prompt suggestions or plugin suggestions |
+| `autonomous` | Long unattended runs that do not stall (turns `guard` on) |
+
+### privacy
+
+| Setting | Stops |
+|---------|-------|
+| `env.DISABLE_TELEMETRY=1` | usage metrics |
+| `env.DISABLE_ERROR_REPORTING=1` | crash and error reports |
+| `env.DISABLE_BUG_COMMAND=1` | `/bug`, which uploads the session transcript |
+| `env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, `feedbackSurveyRate=0` | the "how is Claude doing?" survey |
+| `feedbackDrafts="off"` | model-drafted feedback |
+| `autoUploadSessions=false` | mirroring local sessions to claude.ai |
+| `disableRemoteControl=true`, `remoteControlAtStartup=false` | Remote Control, which relays sessions through claude.ai |
+| `inputNeededNotifEnabled=false`, `agentPushNotifEnabled=false` | mobile push notifications, which carry what Claude asks |
+
+- **The auto-updater stays on.** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` would cover most of the
+  table at once, but it also stops updates, and a missed security fix costs more than a version check.
+- **Your conversation still reaches Anthropic**: prompts, code and tool results are how the model
+  answers. Whether they train Claude is an account setting, at
+  [claude.ai/settings/data-privacy-controls](https://claude.ai/settings/data-privacy-controls).
+- claude.ai connectors (Gmail, Drive…) and synced claude.ai skills are left alone: they are things
+  you chose to connect, not things Claude Code sends behind your back. `disableClaudeAiConnectors`
+  and `syncClaudeAiSkills` turn them off by hand.
+
+### no-trace
+
+The settings are the reliable part — Claude Code then never writes an attribution in the first place:
+`attribution.commit=""`, `attribution.pr=""`, `attribution.sessionUrl=false`, and the deprecated
+`includeCoAuthoredBy=false` for older versions sharing the same file.
+
+A `PreToolUse` hook is the safety net for everything the settings do not cover — a model that
+writes one anyway, an instruction in a skill, a template. It refuses, before it runs:
+
+- a `git commit|tag|notes|merge` or `gh|glab pr|issue|release|api|…` command whose text — or the
+  file it reads its message from (`-F`, `--file`, `--body-file`) — carries `Co-Authored-By: Claude`,
+  `noreply@anthropic.com`, "Generated with Claude Code", a claude.ai session link or `Claude-Session:`;
+- any MCP tool call (a GitHub or Gmail connector) whose input carries one.
+
+Claude gets the reason and rewrites the text. Searching for those strings (`grep`, `git log`) is not
+publishing and is never refused.
+
+### guard
+
+For `bypassPermissions`, where nothing asks first. Two layers, both checked in that mode — deny rules
+and `PreToolUse` hooks apply in every permission mode:
+
+- **Deny rules** for Claude's own file tools: `Read`/`Edit` of `~/.ssh`, `~/.aws`, `~/.gnupg`;
+  `Read` of `~/.config/gh`, `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.netrc`,
+  `~/.npmrc`, `~/.pypirc`, `~/.claude/.credentials.json`, and every `.env` / `.env.*` (templates
+  included — `cat .env.example` still works through Bash).
+- **A Bash hook** that refuses: commands naming those credential stores, the macOS keychain
+  (`security find-*-password`), printing every environment variable (`env`, `printenv`), reading a
+  `.env` file (templates and redirect targets are fine), `git push --force` / `-f` / `--mirror` /
+  `+refspec` (`--force-with-lease` is allowed), `rm -r` on `/`, `~`, `$HOME` or a system
+  directory, `curl … | sh`, and `--no-gpg-sign` / `commit.gpgsign=false`.
+
+A hook is a guard rail against accidents, not a sandbox against an adversary: a command built to
+dodge a pattern can. For hard isolation, Claude Code's own `sandbox` settings are the tool.
+
+### quiet
+
+`spinnerTipsEnabled=false`, `promptSuggestionEnabled=false`, and the built-in plugin-suggestion
+plugin (`cc-plugin-you-should-know@builtin`) off.
+
+### autonomous
+
+`autoContinueAtUsageLimit=true` (wait for the limit to reset, then continue), `autoCompactEnabled`,
+`switchModelsOnFlag=true` (keep going on another model rather than pause), `askUserQuestionTimeout="10m"`
+(a question left unanswered goes on with what was selected) and `fileCheckpointingEnabled` (so
+`/rewind` can undo). Nobody is watching, so it **needs `guard`**: `pack on autonomous` turns it on, and
+`pack off guard` is refused while `autonomous` is on. Overnight, add `ccs caffeine on`.
+
+### How it stays reversible
+
+- The first `ccs pack on <name>` records the previous value of every item in
+  `~/.claude-provider/packs-state.json`; turning it on again re-applies without re-recording.
+- `ccs pack off <name>` restores each value — **except one you changed since**, which is yours. A
+  deny rule you already had before `guard` is never removed; neither is a hook of yours.
+- No setting belongs to two packs, so turning one off never undoes another.
+- `ccs doctor` lists the packs that are on, warns when one has drifted, and warns when
+  `bypassPermissions` runs without `guard`.
+- `ccs purge` keeps the settings — they depend on nothing ccs owns, and purging ccs should not
+  quietly turn telemetry back on — but detaches the hooks, whose scripts it deletes. `ccs pack off
+  all` first reverts everything.
+- Hook scripts live in `~/.claude-provider/hooks/pack-<name>.sh`; `ccs sync` strips and reattaches
+  them like the notify and sync hooks.
 
 ## Keep the machine awake
 
@@ -785,7 +897,7 @@ when it is fresh). Run `ccs reset` to clear
 the active provider, or `ccs purge` to remove all ccs data.
 
 Everything ccs owns lives in `~/.claude-provider/`: `config`, `active`, `models-cache`,
-`hooks/` (notify + sync), `sync/` (the git working copy) and `sync-backup/` (the snapshots taken
+`hooks/` (notify, sync, packs), `packs-state.json`, `sync/` (the git working copy) and `sync-backup/` (the snapshots taken
 before a restore). `ccs reset` only clears `active`; `ccs purge` removes the lot.
 
 ## Contributing
