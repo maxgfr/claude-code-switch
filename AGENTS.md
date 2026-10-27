@@ -328,6 +328,16 @@ config.
   `sync_apply` drops them from the incoming tree (an older ccs may have pushed them) and, on a
   mirror restore, moves the local ones aside before `rm -rf skills` and back afterwards. Without
   that a pull deleted them, and a push published ~10 MB of someone else's skills
+- **`sync_held_paths` is what a restore leaves alone**: `$SYNC_SKIP`, plus every entry of an
+  allow-listed directory that is a symlink to an existing target. Pushed by content (`tar -ch`),
+  such a skill used to come back as a frozen copy on the very machine it was linked on — at
+  every pull, so a SessionStart pull hook detached every linked skill from its checkout. A link
+  whose target is gone is not held: on a new machine the copy is the point. `sync_apply` removes
+  held paths from the incoming tree in both modes (bsdtar also refuses to extract into a linked
+  directory) and moves the local ones aside around a mirror's `rm -rf`
+- **One snapshot directory per restore.** `sync_backup_claude` stamps to the second and used to
+  reuse the directory for two restores in the same second; the second extraction met the first
+  one's files and tar's failure ended ccs mid-restore under `set -e`. It now suffixes `-2`, `-3`…
 - One engine for both backends, because **a gist is a git repository**. `kind=gist` stores a
   flattened tree (`/` → `%2F`, `%` → `%25`, encode `%` first / decode it last) because GitHub's
   gist UI hides subdirectories; `kind=repo` stores the real tree. `.ccs-sync` records the kind so

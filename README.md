@@ -760,7 +760,10 @@ it with the rest of `skills/`.
 Three things happen on the way out, so the config actually works when it lands:
 
 - **Symlinks are dereferenced.** A `skills/` directory full of links into another checkout is
-  copied by content — otherwise the other machine gets dangling links.
+  copied by content — otherwise the other machine gets dangling links. On the way back, a link
+  whose target exists is **left a link**: that checkout is the skill's source of truth, and a pull
+  never freezes it into a copy. Only where the target is missing — a new machine — does the
+  backed-up copy take its place.
 - **`$HOME` is replaced by a placeholder** in every text file, and restored on pull. A `statusLine`
   command or a hook path survives a move to a machine with a different home directory.
 - **ccs's own hook entries are stripped** from `settings.json` and re-attached from local state on

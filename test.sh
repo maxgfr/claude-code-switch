@@ -2303,6 +2303,38 @@ assert_eq "and the deny rules travel with settings.json" "true" \
     "$(jq '.permissions.deny | index("Read(~/.ssh/**)") != null' "$CLAUDE_HOME/settings.json")"
 teardown
 
+# -- A skill linked from its own checkout stays a link --
+printf '\033[1m[sync: linked skills stay links on pull]\033[0m\n'
+sync_setup
+make_claude_home
+mkdir -p "$TEST_CONFIG_DIR/checkout/live"
+printf 'v1\n' > "$TEST_CONFIG_DIR/checkout/live/SKILL.md"
+ln -s "$TEST_CONFIG_DIR/checkout/live" "$CLAUDE_HOME/skills/live"
+ln -s "$TEST_CONFIG_DIR/gone" "$CLAUDE_HOME/skills/broken"
+sync_init_repo
+"$CCS" sync push >/dev/null 2>&1
+assert_contains "pushed by content" "./skills/live/SKILL.md" "$(remote_files)"
+printf 'v2\n' > "$TEST_CONFIG_DIR/checkout/live/SKILL.md"
+"$CCS" sync pull >/dev/null 2>&1
+assert_eq "mirror pull: still a link" "true" "$([ -L "$CLAUDE_HOME/skills/live" ] && echo true || echo false)"
+assert_eq "to the checkout, which keeps its own version" "v2" "$(cat "$CLAUDE_HOME/skills/live/SKILL.md")"
+assert_eq "the rest of skills/ is restored" "name: demo" "$(cat "$CLAUDE_HOME/skills/demo/SKILL.md")"
+"$CCS" sync pull --additive >/dev/null 2>&1
+assert_eq "additive pull: still a link" "true" "$([ -L "$CLAUDE_HOME/skills/live" ] && echo true || echo false)"
+assert_eq "and the other skills still restore" "name: demo" "$(cat "$CLAUDE_HOME/skills/demo/SKILL.md")"
+# A new machine: the checkout is not there, so the backup's copy is what you get
+rm "$CLAUDE_HOME/skills/live"
+mv "$TEST_CONFIG_DIR/checkout" "$TEST_CONFIG_DIR/elsewhere"
+ln -s "$TEST_CONFIG_DIR/checkout/live" "$CLAUDE_HOME/skills/live"
+"$CCS" sync pull >/dev/null 2>&1
+assert_eq "a link whose target is gone is replaced by the copy" "false" \
+    "$([ -L "$CLAUDE_HOME/skills/live" ] && echo true || echo false)"
+assert_eq "with the backed-up content" "v1" "$(cat "$CLAUDE_HOME/skills/live/SKILL.md" 2>/dev/null)"
+# Three pulls a few milliseconds apart: three snapshots, none overwriting another
+assert_eq "one snapshot per restore, even within the same second" "3" \
+    "$(find "$TEST_CONFIG_DIR/.claude-provider/sync-backup" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+teardown
+
 # -- A gist stores a flattened tree, and restores it nested --
 printf '\033[1m[sync: gist flattening]\033[0m\n'
 sync_setup

@@ -4020,9 +4020,16 @@ sync_materialize() {
 }
 
 sync_backup_claude() {
-    local stamp dest paths
+    local stamp dest paths n=1
     stamp=$(date -u '+%Y%m%d-%H%M%S' 2>/dev/null || date +%s)
     dest="${SYNC_BACKUP_DIR}/${stamp}"
+    # Two restores within the same second used to share a snapshot directory:
+    # the second extraction then met the first one's files (a directory where
+    # a link now is) and tar's failure ended ccs under set -e, mid-restore.
+    while [ -e "$dest" ]; do
+        n=$((n + 1))
+        dest="${SYNC_BACKUP_DIR}/${stamp}-${n}"
+    done
     paths=$(sync_existing_paths "$CLAUDE_DIR")
     SYNC_LAST_BACKUP=""
     [ -n "$paths" ] || return 0
@@ -4034,19 +4041,47 @@ sync_backup_claude() {
 }
 
 # sync_apply <tree> <prune> — the only function that writes into ~/.claude
-sync_apply() {
-    local tree="$1" prune="$2" p keep
-    mkdir -p "$CLAUDE_DIR"
-    # $SYNC_SKIP: a remote written by an older ccs may still carry them, and a
-    # mirror restore would otherwise delete the local ones with their parent
-    keep=$(mktemp -d)
+# The entries a restore must leave alone, one path per line, relative to
+# ~/.claude: $SYNC_SKIP, and every entry of an allow-listed directory that is a
+# symlink to something that exists — a skill linked from its own checkout is
+# that checkout's to update. Pushed by content (tar -ch), it used to come back
+# as a frozen copy on the very machine it was linked on, at every pull. A link
+# whose target is gone is not held, so a new machine still gets the copy.
+sync_held_paths() {
+    local p e
     for p in $SYNC_SKIP; do
+        printf '%s\n' "$p"
+    done
+    for p in $SYNC_PATHS; do
+        if [ ! -d "${CLAUDE_DIR}/${p}" ] || [ -L "${CLAUDE_DIR}/${p}" ]; then
+            continue
+        fi
+        for e in "${CLAUDE_DIR}/${p}"/* "${CLAUDE_DIR}/${p}"/.[!.]*; do
+            if [ -L "$e" ] && [ -e "$e" ]; then
+                printf '%s\n' "${e#"${CLAUDE_DIR}/"}"
+            fi
+        done
+    done
+}
+
+sync_apply() {
+    local tree="$1" prune="$2" p keep held
+    mkdir -p "$CLAUDE_DIR"
+    # Held paths never come from the remote (an older ccs may have pushed them,
+    # and extracting into a linked directory fails). On a mirror restore the
+    # local ones are moved aside, since their parent is about to be deleted.
+    keep=$(mktemp -d)
+    held=$(sync_held_paths)
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
         rm -rf "${tree:?}/${p}"
-        if [ "$prune" = "true" ] && [ -e "${CLAUDE_DIR}/${p}" ]; then
+        if [ "$prune" = "true" ] && { [ -e "${CLAUDE_DIR}/${p}" ] || [ -L "${CLAUDE_DIR}/${p}" ]; }; then
             mkdir -p "$(dirname "${keep}/${p}")"
             mv "${CLAUDE_DIR}/${p}" "${keep}/${p}"
         fi
-    done
+    done <<EOF
+$held
+EOF
     for p in $SYNC_PATHS; do
         if [ -e "${tree}/${p}" ]; then
             if [ "$prune" = "true" ]; then
@@ -4065,12 +4100,16 @@ sync_apply() {
             rm -rf "${CLAUDE_DIR:?}/${p}"
         fi
     done
-    for p in $SYNC_SKIP; do
-        if [ -e "${keep}/${p}" ]; then
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        if [ -e "${keep}/${p}" ] || [ -L "${keep}/${p}" ]; then
             mkdir -p "$(dirname "${CLAUDE_DIR}/${p}")"
+            rm -rf "${CLAUDE_DIR:?}/${p}"
             mv "${keep}/${p}" "${CLAUDE_DIR}/${p}"
         fi
-    done
+    done <<EOF
+$held
+EOF
     rm -rf "$keep"
     return 0
 }
