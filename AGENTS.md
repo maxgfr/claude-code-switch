@@ -356,6 +356,13 @@ config.
   `sync_copy_tree` drops nested `.git` entries from the copy at `-mindepth 2`, which is what keeps
   ccs's own working copy at `$SYNC_DIR/.git`. Files are the thing being backed up; the nested
   repository's history is not
+- **Files are stored byte for byte.** Every git call in the working copy goes through `sync_git`
+  (clones through `sync_git_clone`, which defers the checkout), and both pass
+  `-c core.autocrlf=false -c core.safecrlf=false` and pin `.git/info/attributes` to
+  `* -text -eol -filter -ident -working-tree-encoding`. Without that, a global `core.autocrlf=true`
+  printed "CRLF will be replaced by LF" on push and turned LF into CRLF on restore, and a skill's
+  own `.gitattributes` could do the same. Both live inside `.git`, so the published tree and its
+  allow-list are unchanged, and the next call fixes a working copy made by an older ccs
 - **One path may refuse to extract.** `sync_apply`'s additive branch extracts over what is already
   there, and bsdtar will not extract through a directory symlink. Under `set -e` that ended the
   `SYNC_PATHS` loop midway — every later path skipped, hooks never reattached, temp tree leaked —

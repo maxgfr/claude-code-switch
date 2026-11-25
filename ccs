@@ -3602,14 +3602,55 @@ require_git() {
 # All git in the working copy goes through here. CCS_SYNC_BATCH (set by the
 # auto/hook paths) forbids any credential prompt, so an unattended sync fails
 # fast instead of hanging a launch.
-sync_git() {
+#
+# A backup stores bytes, not text: the user's own core.autocrlf / core.safecrlf
+# would otherwise normalise CRLF on commit (with a "CRLF will be replaced by
+# LF" warning) and re-add it on checkout, so a file restored on another machine
+# could differ from the one pushed. The -c flags override any global or system
+# value for every call, existing working copies included; .git/info/attributes
+# outranks every .gitattributes a backed-up skill may carry, and the user's
+# core.attributesFile. Both live inside .git, never in the published tree.
+SYNC_GIT_ATTRIBUTES='* -text -eol -filter -ident -working-tree-encoding'
+
+sync_git_raw() {
     if [ -n "${CCS_SYNC_BATCH:-}" ]; then
         GIT_TERMINAL_PROMPT=0 \
         GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}" \
-            git -C "$SYNC_DIR" "$@"
+            git -c core.autocrlf=false -c core.safecrlf=false "$@"
     else
-        git -C "$SYNC_DIR" "$@"
+        git -c core.autocrlf=false -c core.safecrlf=false "$@"
     fi
+}
+
+# Pin <dir>/.git/info/attributes to the verbatim rule. Rewritten only when it
+# differs, so the common case is one read.
+sync_git_verbatim_attrs() {
+    local info="${1}/.git/info"
+    [ -d "${1}/.git" ] || return 0
+    if [ "$(cat "${info}/attributes" 2>/dev/null)" != "$SYNC_GIT_ATTRIBUTES" ]; then
+        mkdir -p "$info" 2>/dev/null || return 0
+        printf '%s\n' "$SYNC_GIT_ATTRIBUTES" > "${info}/attributes" 2>/dev/null || true
+    fi
+    return 0
+}
+
+sync_git() {
+    sync_git_verbatim_attrs "$SYNC_DIR"
+    sync_git_raw -C "$SYNC_DIR" "$@"
+}
+
+# git clone <remote> <dir> [clone flags...], with the same byte-for-byte rules.
+# The checkout is deferred until the attributes are in place, since a plain
+# clone checks out before anything can be written into .git.
+sync_git_clone() {
+    local remote="$1" dir="$2"
+    shift 2
+    sync_git_raw clone --quiet --no-checkout "$@" "$remote" "$dir" || return 1
+    sync_git_verbatim_attrs "$dir"
+    if sync_git_raw -C "$dir" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+        sync_git_raw -C "$dir" reset --hard --quiet || return 1
+    fi
+    return 0
 }
 
 load_sync_cfg() {
@@ -3996,7 +4037,7 @@ sync_clone() {
     require_git
     rm -rf "$SYNC_DIR"
     mkdir -p "$CONFIG_DIR"
-    if ! git clone --quiet "$SYNC_REMOTE" "$SYNC_DIR" 2>/dev/null; then
+    if ! sync_git_clone "$SYNC_REMOTE" "$SYNC_DIR" 2>/dev/null; then
         rm -rf "$SYNC_DIR"
         die "could not clone $SYNC_REMOTE
     Check the URL and that your git credentials reach it:
@@ -4447,7 +4488,7 @@ cmd_sync_import() {
     load_sync_cfg
     remote=$(sync_normalize_remote "$src")
     tmp=$(mktemp -d)
-    if ! git clone --quiet --depth 1 "$remote" "${tmp}/repo" 2>/dev/null; then
+    if ! sync_git_clone "$remote" "${tmp}/repo" --depth 1 2>/dev/null; then
         rm -rf "$tmp"
         die "could not clone $remote"
     fi

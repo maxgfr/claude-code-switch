@@ -2195,6 +2195,11 @@ remote_files() {
     ( cd "$TEST_CONFIG_DIR/verify" && find . -path ./.git -prune -o -type f -print | sort )
 }
 
+# The committed bytes of <path> in the verify clone equal <file>
+remote_blob_is() {
+    git -C "$TEST_CONFIG_DIR/verify" cat-file blob "HEAD:$1" | cmp -s - "$2"
+}
+
 # -- Reserved sections are not providers --
 printf '\033[1m[sync: reserved sections]\033[0m\n'
 setup
@@ -2224,6 +2229,53 @@ assert_not_contains "remote has no credentials" "credentials" "$files"
 assert_not_contains "remote has no machine-local settings" "settings.local.json" "$files"
 out=$("$CCS" sync push 2>&1)
 assert_contains "a second push is a no-op" "Already up to date" "$out"
+teardown
+
+# -- A backup stores bytes: a global core.autocrlf rewrites nothing --
+# The user's own git config applies inside the working copy unless ccs
+# overrides it: autocrlf=true turns CRLF into LF on commit (with a warning) and
+# LF into CRLF on checkout, so the restored file is not the one pushed. A
+# skill's own .gitattributes must not get a say either.
+printf '\033[1m[sync: files are stored byte for byte]\033[0m\n'
+sync_setup
+make_claude_home
+mkdir -p "$CLAUDE_HOME/skills/demo/scripts" "$TEST_CONFIG_DIR/orig"
+printf '@echo off\r\necho hi\r\n' > "$CLAUDE_HOME/skills/demo/scripts/run.cmd"
+printf '#!/bin/sh\necho hi\n' > "$CLAUDE_HOME/skills/demo/scripts/run.sh"
+printf '* text=auto\n*.cmd text eol=lf\n' > "$CLAUDE_HOME/skills/demo/.gitattributes"
+cp "$CLAUDE_HOME/skills/demo/scripts/run.cmd" "$CLAUDE_HOME/skills/demo/scripts/run.sh" "$TEST_CONFIG_DIR/orig/"
+CRLF_GITCONFIG="$TEST_CONFIG_DIR/gitconfig-crlf"
+{ cat "$STUB_DIR/gitconfig"; printf '[core]\n\tautocrlf = true\n\tsafecrlf = warn\n'; } > "$CRLF_GITCONFIG"
+out=$(GIT_CONFIG_GLOBAL="$CRLF_GITCONFIG" "$CCS" sync init --repo "$SYNC_REMOTE_URL" 2>&1 \
+    && GIT_CONFIG_GLOBAL="$CRLF_GITCONFIG" "$CCS" sync push 2>&1)
+assert_contains "push succeeds under a global autocrlf" "Backed up" "$out"
+assert_not_contains "and prints no CRLF warning" "CRLF" "$out"
+remote_files >/dev/null
+assert_eq "the remote blob keeps its CRLF" "same" "$(remote_blob_is skills/demo/scripts/run.cmd "$TEST_CONFIG_DIR/orig/run.cmd" && echo same || echo differs)"
+rm -rf "$TEST_CONFIG_DIR/.claude-provider" "$CLAUDE_HOME"
+mkdir -p "$CLAUDE_HOME"
+"$CCS" help >/dev/null 2>&1
+out=$(GIT_CONFIG_GLOBAL="$CRLF_GITCONFIG" "$CCS" sync init --repo "$SYNC_REMOTE_URL" 2>&1 \
+    && GIT_CONFIG_GLOBAL="$CRLF_GITCONFIG" "$CCS" sync pull 2>&1)
+assert_not_contains "a fresh restore prints no CRLF warning" "CRLF" "$out"
+assert_exit "and restores the CRLF file byte-identical" "0" \
+    cmp -s "$TEST_CONFIG_DIR/orig/run.cmd" "$CLAUDE_HOME/skills/demo/scripts/run.cmd"
+assert_exit "and the LF file too" "0" \
+    cmp -s "$TEST_CONFIG_DIR/orig/run.sh" "$CLAUDE_HOME/skills/demo/scripts/run.sh"
+# A working copy made by an older ccs has no attributes file: the next call adds it
+rm -f "$TEST_CONFIG_DIR/.claude-provider/sync/.git/info/attributes"
+printf 'echo again\r\n' >> "$CLAUDE_HOME/skills/demo/scripts/run.cmd"
+cp "$CLAUDE_HOME/skills/demo/scripts/run.cmd" "$TEST_CONFIG_DIR/orig/run.cmd"
+out=$(GIT_CONFIG_GLOBAL="$CRLF_GITCONFIG" "$CCS" sync push 2>&1)
+assert_not_contains "an existing working copy is covered too" "CRLF" "$out"
+remote_files >/dev/null
+assert_eq "and its push stays byte-identical" "same" "$(remote_blob_is skills/demo/scripts/run.cmd "$TEST_CONFIG_DIR/orig/run.cmd" && echo same || echo differs)"
+rm -rf "$TEST_CONFIG_DIR/.claude-provider" "$CLAUDE_HOME"
+mkdir -p "$CLAUDE_HOME"
+"$CCS" help >/dev/null 2>&1
+GIT_CONFIG_GLOBAL="$CRLF_GITCONFIG" "$CCS" sync import "$SYNC_REMOTE_URL" --yes >/dev/null 2>&1
+assert_exit "import restores byte-identical as well" "0" \
+    cmp -s "$TEST_CONFIG_DIR/orig/run.cmd" "$CLAUDE_HOME/skills/demo/scripts/run.cmd"
 teardown
 
 # -- Symlinked skills are materialised, not linked --
