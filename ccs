@@ -2312,7 +2312,8 @@ cmd_models() {
 
 # --- Doctor ---
 # `ccs doctor` is read-only: one line per check, exit 1 only when something is
-# actually broken (a fail), never for a missing optional tool (a warn).
+# actually broken (a fail), never for a missing optional tool (a warn). Its one
+# network call is the sync remote's `git ls-remote`, bounded by SYNC_TIMEOUT.
 
 DOCTOR_FAILED=0
 
@@ -2524,17 +2525,68 @@ EOF
     fi
 }
 
+# One read-only `git ls-remote`, run by sync_run_bounded. Its stderr goes to
+# $1: the watchdog throws the job's own output away, and the message is the
+# only way to tell a missing repository from a missing network. No prompt of
+# any kind, so a doctor run can never sit waiting on a password. LC_ALL=C
+# because doctor_sync_reach reads git's messages, which are translated.
+doctor_sync_probe() {
+    LC_ALL=C LANGUAGE='' GIT_TERMINAL_PROMPT=0 \
+    GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}" \
+        git ls-remote "$SYNC_REMOTE" </dev/null >/dev/null 2>"$1"
+}
+
+# Is the remote there? Three answers, because they call for different fixes:
+# the repository does not exist (or is invisible to these credentials), git
+# has no credentials for it, or nothing answered at all — which is a network
+# problem, not a reason to claim the repository is gone.
+doctor_sync_reach() {
+    local err rc=0 msg
+    err=$(mktemp)
+    sync_run_bounded "$SYNC_TIMEOUT" doctor_sync_probe "$err" || rc=$?
+    msg=$(tr '[:upper:]' '[:lower:]' < "$err" 2>/dev/null || true)
+    rm -f "$err"
+    if [ "$rc" = "0" ]; then
+        doctor_ok "sync remote: $SYNC_REMOTE ($SYNC_KIND), reachable"
+        return 0
+    fi
+    if [ "$rc" = "124" ]; then
+        doctor_warn "sync remote $SYNC_REMOTE did not answer within ${SYNC_TIMEOUT}s — offline or slow network? Launch syncs will time out the same way"
+        return 0
+    fi
+    case "$msg" in
+        *"not found"*|*"could not be found"*|*"does not exist"*|*"does not appear to be a git repository"*|*"no such file or directory"*)
+            doctor_fail "sync remote not found: $SYNC_REMOTE — every launch sync and push will fail"
+            printf '          create it (ccs sync init --repo-new <name> makes a private one with gh),\n'
+            printf '          fix the URL (ccs config set _sync remote <url>), or turn sync off (ccs sync off)\n'
+            ;;
+        *"could not read username"*|*"could not read password"*|*"terminal prompts disabled"*|*"authentication failed"*|*"permission denied"*|*"access denied"*|*"error: 403"*)
+            doctor_fail "sync remote refused these credentials: $SYNC_REMOTE — it may not exist, or git is not authenticated for it"
+            printf '          authenticate git (gh auth login, or an SSH key), fix the URL\n'
+            printf '          (ccs config set _sync remote <url>), or turn sync off (ccs sync off)\n'
+            ;;
+        *)
+            doctor_warn "could not reach the sync remote $SYNC_REMOTE — offline? Retry once the network is back"
+            ;;
+    esac
+    return 0
+}
+
 doctor_sync() {
     load_sync_cfg
     if [ -z "$SYNC_REMOTE" ]; then
         doctor_ok "sync not configured"
         return 0
     fi
-    doctor_ok "sync remote: $SYNC_REMOTE ($SYNC_KIND)"
+    if have_git; then
+        doctor_sync_reach
+    else
+        doctor_ok "sync remote: $SYNC_REMOTE ($SYNC_KIND) — not checked, git is missing"
+    fi
     if [ -d "$SYNC_DIR/.git" ]; then
         doctor_ok "sync working copy present: $(tilde "$SYNC_DIR")"
     else
-        doctor_warn "sync working copy missing — the next push or pull clones it (no network was used)"
+        doctor_warn "sync working copy missing — the next push or pull clones it"
     fi
     if [ "$SYNC_AUTO_LAUNCH" = "true" ] && ! have_git; then
         doctor_warn "sync auto is on but git is missing — every launch will skip it"
@@ -4694,7 +4746,7 @@ sync_auto_launch() {
             warn "config sync timed out after ${SYNC_TIMEOUT}s — launching anyway"
             rm -f "${SYNC_DIR}/.git/index.lock" 2>/dev/null || true
             ;;
-        *) warn "config sync failed — launching anyway (run 'ccs sync push' to see why)" ;;
+        *) warn "config sync failed — launching anyway (run 'ccs doctor' or 'ccs sync push' to see why)" ;;
     esac
     return 0
 }
