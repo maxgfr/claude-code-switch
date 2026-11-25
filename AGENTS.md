@@ -398,7 +398,7 @@ config.
 
 ## Doctor (`ccs doctor`)
 
-- **Read-only, no network.** One `doctor_*` function per area, each printing `ok` / `warn` / `fail`
+- **Read-only, one network call.** One `doctor_*` function per area, each printing `ok` / `warn` / `fail`
   lines through the three `doctor_ok|warn|fail` helpers; only `doctor_fail` flips `DOCTOR_FAILED`,
   and that is the sole source of the exit status. A missing optional tool is a `warn` that names
   what it switches off — the same contract as the runtime degradation
@@ -407,6 +407,18 @@ config.
   for the hook scan (`.hooks[][].hooks[].command` filtered on `$CCS_HOOK_MARKER`, each checked with
   `-x`). Invalid section headers are found with a grep on the file, because `parse_config` only
   reports them on stderr
+- **The sync remote is probed, because "configured" is not "there".** Doctor used to print
+  `ok sync remote: <url>` and `All good.` for a repository that did not exist, while every launch
+  warned `config sync failed`. `doctor_sync_reach` runs one `git ls-remote` through
+  `sync_run_bounded "$SYNC_TIMEOUT"` (the auto sync's watchdog), with `GIT_TERMINAL_PROMPT=0`,
+  `ssh -o BatchMode=yes` and stdin on `/dev/null`, so it can neither hang nor prompt. The watchdog
+  discards the job's output, so `doctor_sync_probe` writes stderr to a temp file, under `LC_ALL=C`
+  because git translates its messages. Three outcomes: "not found / does not appear to be a git
+  repository" is a `fail` with the three fixes (create, `config set _sync remote`, `sync off`);
+  a credential refusal is a `fail` pointing at `gh auth login`; anything else — DNS, refused
+  connection, the budget running out — is a `warn` that says *could not reach*, never that the
+  repository is missing. Skipped when git is absent. The launch warning now points at
+  `ccs doctor` first
 - `test.sh` covers it with the existing stubs plus a rebuilt bare `PATH` (same trick as
   `[sync: git absent]`) to reach every warn, and a hand-written `settings.json` for the orphan-hook
   and invalid-JSON fails

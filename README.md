@@ -846,17 +846,23 @@ is only ever written when the local one is empty — **a pull can never cost you
 ccs doctor
 ```
 
-One line per check, read-only, no network. `ok` / `warn` / `fail`; the exit status is 1 only when
-something is actually broken:
+One line per check, read-only. `ok` / `warn` / `fail`; the exit status is 1 only when something is
+actually broken. Its only network call is a `git ls-remote` on the sync remote, when one is set,
+bounded by the same 5 s budget as the auto sync and never prompting for a password:
 
 - **fail** — `claude` missing from `PATH`; the active provider has no key or is gone from the
   config; `~/.claude/settings.json` is not valid JSON; a ccs hook in it points to a script that no
-  longer exists (regenerate with `ccs notify on` / `ccs sync hooks on`, or detach with `off`)
+  longer exists (regenerate with `ccs notify on` / `ccs sync hooks on`, or detach with `off`); the
+  sync remote does not exist or refuses git's credentials — with the fix: create it
+  (`ccs sync init --repo-new <name>`), correct the URL (`ccs config set _sync remote <url>`), or
+  turn sync off (`ccs sync off`)
 - **warn** — an optional tool is missing (`jq`, `git`, `llm-models`) with what that switches off;
   `model=auto` is configured but llm-models is missing or older than 1.4 (no `latest` command);
   caffeine is on but no keep-awake tool works here (WSL included); a config section the parser
-  skips; permissions looser than `700` on `~/.claude-provider` or `600` on `config` / `active`
-- **info as ok** — the active provider, the sync remote and whether its working copy exists
+  skips; permissions looser than `700` on `~/.claude-provider` or `600` on `config` / `active`;
+  the sync remote could not be reached at all (offline, DNS, timeout — not claimed missing)
+- **info as ok** — the active provider, the sync remote (reachable) and whether its working copy
+  exists
 
 ## Shell integration
 

@@ -635,11 +635,47 @@ assert_contains "and suggests the fix" "ccs notify on" "$out"
 out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1)
 assert_exit "a live ccs hook is fine" "0" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
 assert_contains "and is counted" "hook" "$out"
-# Sync: remote shown, no network
-"$CCS" config set _sync remote "https://example.invalid/x.git" >/dev/null 2>&1
-out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1 || true)
-assert_contains "the sync remote is reported" "example.invalid" "$out"
+# Sync: the remote is probed with one bounded, prompt-free ls-remote. Every
+# case stays off the network: a bare repo over file://, a path that does not
+# exist, and a git shim that fails the way an offline machine does.
+git init --bare -q "$TEST_CONFIG_DIR/doctor-remote.git"
+"$CCS" config set _sync remote "file://$TEST_CONFIG_DIR/doctor-remote.git" >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1)
+assert_contains "a reachable sync remote is reported" "doctor-remote.git (repo), reachable" "$out"
 assert_contains "and a missing working copy is mentioned" "working copy" "$out"
+assert_exit "and is not a fail" "0" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+"$CCS" config set _sync remote "file://$TEST_CONFIG_DIR/missing.git" >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1 || true)
+assert_exit "a sync remote that does not exist is a fail" "1" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+assert_contains "and is named" "sync remote not found: file://$TEST_CONFIG_DIR/missing.git" "$out"
+assert_not_contains "it is no longer reported ok" "reachable" "$out"
+assert_not_contains "and the summary no longer says all good" "All good." "$out"
+assert_contains "the fix offers creating it" "ccs sync init --repo-new" "$out"
+assert_contains "or fixing the URL" "ccs config set _sync remote <url>" "$out"
+assert_contains "or turning sync off" "ccs sync off" "$out"
+GIT_REAL=$(command -v git)
+# A git whose ls-remote fails with the given message; everything else is real
+git_ls_remote_fails() {
+    cat > "$SHIM_DIR/git" <<EOF
+#!/bin/sh
+if [ "\$1" = ls-remote ]; then echo "$1" >&2; exit 128; fi
+exec "$GIT_REAL" "\$@"
+EOF
+    chmod +x "$SHIM_DIR/git"
+}
+git_ls_remote_fails "fatal: unable to access 'https://example.com/x.git/': Could not resolve host: example.com"
+"$CCS" config set _sync remote "https://example.com/x.git" >/dev/null 2>&1
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1)
+assert_contains "no network says the remote could not be reached" "could not reach the sync remote" "$out"
+assert_not_contains "without claiming it does not exist" "sync remote not found" "$out"
+assert_exit "and is a warn, not a fail" "0" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+git_ls_remote_fails "fatal: could not read Username for 'https://example.com': terminal prompts disabled"
+out=$(PATH="$SHIM_DIR:$PATH" "$CCS" doctor 2>&1 || true)
+assert_exit "a remote asking for credentials is a fail" "1" env PATH="$SHIM_DIR:$PATH" "$CCS" doctor
+assert_contains "and points at authentication" "gh auth login" "$out"
+rm -f "$SHIM_DIR/git"
+out=$(PATH="$SHIM_DIR:$BARE_DIR" "$CCS" doctor 2>&1 || true)
+assert_contains "without git the remote is shown unchecked" "not checked, git is missing" "$out"
 rm -rf "$SHIM_DIR" "$BARE_DIR"
 teardown
 
@@ -2471,6 +2507,7 @@ set_key _sync remote "file://$TEST_CONFIG_DIR/gone.git"
 out=$(PATH="$SHIM_DIR:$PATH" "$CCS" launch 2>&1)
 assert_contains "an unreachable remote still launches claude" "CLAUDE_RAN" "$out"
 assert_contains "and says why" "config sync failed" "$out"
+assert_contains "and points at doctor to diagnose it" "ccs doctor" "$out"
 "$CCS" sync auto off >/dev/null 2>&1
 rm -rf "$SHIM_DIR"
 teardown
